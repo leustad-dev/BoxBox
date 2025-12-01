@@ -3,7 +3,7 @@ session = fastf1.get_session(2025, 23, 'Q')
 event_schedule = fastf1.get_event_schedule(2025, include_testing=True)
 print(session.name, session.date, session.event['EventName'])
 # print(event_schedule['RoundNumber'].astype(str) + " " + event_schedule['Country'])
-print(event_schedule['Location'])
+print(event_schedule.columns)
 
 # session.load()
 # # print(session.results)

@@ -128,7 +128,8 @@ def calendar(ctx: Context) -> str:
         # Build a neat header with explicit column names (include Location)
         title = f"F1 {year} Calendar"
         # Define fixed column widths and a safe clipper to avoid shifting when values are long
-        CW, LW, RW, QW = 16, 18, 20, 20  # Country, Location, Race, Qualifying widths
+        # Country, Location, Race, Sprint, Sprint Qual, Qualifying widths
+        CW, LW, RW, SW, SQW, QW = 16, 18, 20, 16, 16, 16
 
         def clip(val: object, width: int) -> str:
             s = "" if val is None else str(val)
@@ -137,7 +138,10 @@ def calendar(ctx: Context) -> str:
             # Prefer hard clip instead of ellipsis to keep alignment perfectly consistent
             return s[:width]
 
-        header = f"{'Rnd':>3}  {'Country':<{CW}}  {'Location':<{LW}}  {'Race':<{RW}}  {'Qualifying':<{QW}}"
+        header = (
+            f"{'Rnd':>3}  {'Country':<{CW}}  {'Location':<{LW}}  "
+            f"{'Sprint Qual':<{SQW}}  {'Sprint':<{SW}}  {'Race Qual':<{QW}}  {'Race':<{RW}}"
+        )
         rule_len = max(len(header), len(title))
         hr = "-" * rule_len  # ASCII rule for broad terminal compatibility
         lines = [title, header, hr]
@@ -149,34 +153,59 @@ def calendar(ctx: Context) -> str:
             except Exception:
                 schedule_sorted = schedule
 
-            # Pre-compute which Session column stores Qualifying by scanning names
+            # Pre-compute which Session column stores specific sessions by scanning names
             session_name_cols = [c for c in schedule_sorted.columns if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")]
-            # Helper to find qualifying date column index for a given row
-            def find_quali_dt(row):
-                # Prefer an exact 'Qualifying' match; fallback to contains 'Qualifying'
+
+            def _find_session_dt(row, matchers):
+                """Generic helper to find a session date column by name.
+                `matchers` is a list of callables that accept a lowercase session name
+                and return True if it matches the desired session.
+                """
                 chosen_idx = None
-                for strict in (True, False):
-                    for c in sorted(session_name_cols):
-                        name = str(row.get(c, ""))
-                        if not name:
-                            continue
-                        lname = name.lower()
-                        if strict:
-                            cond = lname == "qualifying"
-                        else:
-                            cond = "qualifying" in lname
-                        # Exclude sprint shootout/other non-standard formats if strict stage failed
-                        if cond and "shootout" not in lname:
-                            # find matching date column
-                            # SessionX -> SessionXDateUtc (typical in fastf1 3.7)
-                            idx = c[len("Session"):]
-                            date_col = f"Session{idx}DateUtc"
-                            if date_col in schedule_sorted.columns:
-                                chosen_idx = date_col
-                                break
-                    if chosen_idx:
-                        break
+                for c in sorted(session_name_cols):
+                    name = str(row.get(c, ""))
+                    if not name:
+                        continue
+                    lname = name.lower()
+                    if any(m(lname) for m in matchers):
+                        idx = c[len("Session"):]
+                        date_col = f"Session{idx}DateUtc"
+                        if date_col in schedule_sorted.columns:
+                            chosen_idx = date_col
+                            break
                 return chosen_idx
+
+            def find_quali_dt(row):
+                # Qualifying (exclude sprint shootout)
+                return _find_session_dt(
+                    row,
+                    [
+                        lambda n: n == "qualifying",
+                        lambda n: ("qualifying" in n) and ("sprint" not in n) and ("shootout" not in n),
+                    ],
+                )
+
+            def find_sprint_dt(row):
+                # Sprint race (not sprint qualifying/shootout)
+                return _find_session_dt(
+                    row,
+                    [
+                        lambda n: n == "sprint",
+                        lambda n: ("sprint" in n) and ("qual" not in n) and ("shootout" not in n),
+                    ],
+                )
+
+            def find_sprint_quali_dt(row):
+                # Sprint Qualifying (older naming) or Sprint Shootout (newer naming)
+                return _find_session_dt(
+                    row,
+                    [
+                        lambda n: n == "sprint qualifying",
+                        lambda n: n == "sprint shootout",
+                        lambda n: "sprint qualifying" in n,
+                        lambda n: "sprint shootout" in n,
+                    ],
+                )
 
             for _, row in schedule_sorted.iterrows():
                 rn_val = row.get("RoundNumber", "")
@@ -190,6 +219,22 @@ def calendar(ctx: Context) -> str:
                 dt_utc = row.get("Session5DateUtc", None)
                 local_str = clip(format_local(dt_utc), RW)
 
+                # Sprint time (if available)
+                sprint_col = find_sprint_dt(row)
+                if sprint_col:
+                    s_dt_utc = row.get(sprint_col, None)
+                    sprint_str = clip(format_local(s_dt_utc), SW)
+                else:
+                    sprint_str = "-"
+
+                # Sprint Qualifying / Shootout time (if available)
+                sprint_q_col = find_sprint_quali_dt(row)
+                if sprint_q_col:
+                    sq_dt_utc = row.get(sprint_q_col, None)
+                    sprint_q_str = clip(format_local(sq_dt_utc), SQW)
+                else:
+                    sprint_q_str = "-"
+
                 # Qualifying time (if available)
                 quali_col = find_quali_dt(row)
                 if quali_col:
@@ -199,7 +244,7 @@ def calendar(ctx: Context) -> str:
                     quali_str = "-"
 
                 lines.append(
-                    f"{rn:>3}  {country:<{CW}}  {location:<{LW}}  {local_str:<{RW}}  {quali_str:<{QW}}"
+                    f"{rn:>3}  {country:<{CW}}  {location:<{LW}}  {sprint_q_str:<{SQW}}  {sprint_str:<{SW}}  {quali_str:<{QW}}  {local_str:<{RW}}"
                 )
                 # Row separator for table-like readability
                 lines.append(hr)
