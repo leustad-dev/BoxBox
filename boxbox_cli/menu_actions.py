@@ -10,9 +10,59 @@ from typing import Dict, Optional
 from datetime import date, datetime, timezone
 
 import fastf1
+import os
+import io
+from datetime import datetime as _dt
 
 
 Context = Dict[str, Optional[object]]
+
+
+# --- Lightweight file logger -------------------------------------------------
+_LOG_FILE_PATH: Optional[str] = None
+
+
+def _ensure_logs_dir() -> str:
+    base = os.getcwd()
+    logs_dir = os.path.join(base, "logs")
+    try:
+        os.makedirs(logs_dir, exist_ok=True)
+    except Exception:
+        pass
+    return logs_dir
+
+
+def _open_log_file() -> str:
+    global _LOG_FILE_PATH
+    if _LOG_FILE_PATH:
+        return _LOG_FILE_PATH
+    logs_dir = _ensure_logs_dir()
+    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    _LOG_FILE_PATH = os.path.join(logs_dir, f"{ts}.txt")
+    # File is created lazily by _log when needed
+    return _LOG_FILE_PATH
+
+
+def _log(line: str) -> None:
+    """Write to logfile only for warnings/errors.
+
+    We treat any line containing 'ERROR' or 'WARN' (case-insensitive)
+    as worthy of logging. All other lines are ignored to avoid
+    unnecessary log file creation and noise.
+    """
+    try:
+        u = str(line).upper()
+        if ("ERROR" not in u) and ("WARN" not in u):
+            return
+        path = _open_log_file()
+        # Create the file and write header if it does not exist yet
+        header_needed = not os.path.exists(path)
+        with open(path, "a", encoding="utf-8") as f:
+            if header_needed:
+                f.write(f"BoxBox Log started at {_dt.now().isoformat()}\n")
+            f.write(line.rstrip("\n") + "\n")
+    except Exception:
+        pass
 
 
 def live_timing(ctx: Context) -> str:
@@ -226,8 +276,263 @@ def drivers(ctx: Context) -> str:
     return "\n".join(lines)
 
 
-def constructors(ctx: Context) -> str:
-    return "Constructors selected (stub)"
+def results(ctx: Context) -> str:
+    """Show season results: driver and constructor standings side-by-side.
+
+    Implementation switched to FastF1-only aggregation (no Ergast), summing
+    points from Race ('R') and Sprint ('S') sessions across the selected
+    season. This avoids issues with Ergast responses in ongoing seasons.
+
+    - Drivers table: Pos, Driver, Nat, Team, Pts (sorted by points desc)
+    - Teams table:   Pos, Team, Pts (sorted by points desc)
+    - Seasons prior to 2018 are not supported here (no live timing/results).
+    """
+    try:
+        year = int(ctx.get("season") or date.today().year)
+    except Exception:
+        year = date.today().year
+
+    title = f"F1 {year} Results"
+
+    # Column widths
+    POSW = 3
+    DNAMEW = 22
+    NATW = 4
+    TNAMEW = 22
+    PTSW = 6
+
+    T_POSW = 3
+    T_TEAMW = 26
+    T_PTSW = 6
+
+    GUTTER = 4
+
+    def clip(val: object, width: int) -> str:
+        s = "" if val is None else str(val)
+        return s if len(s) <= width else s[:width]
+
+    # Only log warnings/errors; info logs are suppressed
+    _log(f"[results] Rendering results for season={year}")
+
+    if year < 2018:
+        _log("[results] WARN: year < 2018 not supported for FastF1 aggregation")
+        return "Driver/Team results are only available from 2018 onwards."
+
+    # Aggregation stores
+    from collections import defaultdict
+
+    driver_points: dict[str, float] = defaultdict(float)
+    driver_name: dict[str, str] = {}
+    driver_nat: dict[str, str] = {}
+    driver_team: dict[str, str] = {}
+
+    team_points: dict[str, float] = defaultdict(float)
+
+    # Get schedule and iterate sessions up to now
+    try:
+        schedule = fastf1.get_event_schedule(year, include_testing=False)
+    except Exception as exc:
+        _log(f"[results] ERROR loading schedule: {exc}")
+        return f"No data Available for {year} F1 Season..."
+
+    cols = list(getattr(schedule, "columns", []))
+    now_utc = datetime.now(timezone.utc)
+
+    def _row_has_sprint(row) -> bool:
+        # Detect sprint weekend via EventFormat or session names
+        fmt = str(row.get("EventFormat", "") or "").lower()
+        if "sprint" in fmt:
+            return True
+        # else scan session names
+        for c in cols:
+            if c.startswith("Session") and not c.endswith("Utc") and not c.endswith("DateUtc") and c[-1:].isdigit():
+                name = str(row.get(c, "") or "").lower()
+                if name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name):
+                    return True
+        return False
+
+    def _session_dt_utc(row, code: str):
+        # Try to find a matching datetime for code to filter future sessions
+        name_cols = [c for c in cols if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")]
+        for nc in name_cols:
+            idx = nc[len("Session"):]
+            dcol = f"Session{idx}DateUtc"
+            name = str(row.get(nc, "") or "").strip().lower()
+            if code == "R" and (name == "race" or "grand prix" in name or "grandprix" in name):
+                return row.get(dcol)
+            if code == "S" and (name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name)):
+                return row.get(dcol)
+        return None
+
+    # Iterate events
+    rounds_processed = 0
+    sessions_loaded = 0
+    for _, row in schedule.iterrows():
+        rnd_val = row.get("RoundNumber", None)
+        try:
+            rnd = int(rnd_val)
+        except Exception:
+            _log(f"[results] skip row with invalid RoundNumber={rnd_val}")
+            continue
+
+        # Determine which sessions to aggregate
+        to_consider = ["R"]
+        if _row_has_sprint(row):
+            to_consider.append("S")
+
+        for code in to_consider:
+            # Skip future sessions by timestamp if available
+            ts = _session_dt_utc(row, code)
+            try:
+                # Normalize pandas.Timestamp and naive datetimes
+                import pandas as _pd  # type: ignore
+                if isinstance(ts, _pd.Timestamp):
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize("UTC")
+                    ts = ts.tz_convert("UTC").to_pydatetime()
+                if isinstance(ts, datetime) and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+            if ts is not None and isinstance(ts, datetime) and ts > now_utc:
+                # future session skipped (info suppressed)
+                continue
+
+            try:
+                sess = fastf1.get_session(year, rnd, code)
+                sess.load(telemetry=False, laps=False, weather=False, messages=False)
+                df = getattr(sess, "results", None)
+                if df is None or getattr(df, "empty", False):
+                    # empty results (info suppressed)
+                    continue
+                sessions_loaded += 1
+                rounds_processed = max(rounds_processed, rnd)
+
+                # Determine useful columns
+                cols_r = set(df.columns)
+                name_col = (
+                    "FullName" if "FullName" in cols_r else
+                    ("DriverName" if "DriverName" in cols_r else ("Driver" if "Driver" in cols_r else "Abbreviation"))
+                )
+                team_col = "TeamName" if "TeamName" in cols_r else ("Team" if "Team" in cols_r else None)
+                pts_col = "Points" if "Points" in cols_r else ("points" if "points" in cols_r else None)
+
+                if pts_col is None:
+                    _log(f"[results] no Points column for rnd={rnd} code={code}; columns={list(df.columns)}")
+                    continue
+
+                for _, r in df.iterrows():
+                    abbr = str(r.get("Abbreviation", "") or "").strip()
+                    pts = r.get(pts_col, 0) or 0
+                    try:
+                        pts = float(pts)
+                    except Exception:
+                        try:
+                            pts = float(str(pts).strip())
+                        except Exception:
+                            pts = 0.0
+                    name = str(r.get(name_col, abbr) or abbr)
+                    team = str(r.get(team_col, "") or "") if team_col else ""
+
+                    # Nationality via driver metadata when possible
+                    nat = driver_nat.get(abbr)
+                    if not nat and hasattr(sess, "get_driver") and abbr:
+                        try:
+                            dmeta = sess.get_driver(abbr) or {}
+                            nat = dmeta.get("CountryCode") or dmeta.get("Nationality") or ""
+                        except Exception:
+                            nat = ""
+
+                    # Update driver stores
+                    driver_points[abbr] += pts
+                    if name and abbr not in driver_name:
+                        driver_name[abbr] = name
+                    if nat:
+                        driver_nat[abbr] = nat
+                    if team:
+                        driver_team[abbr] = team
+
+                    # Update team totals
+                    if team:
+                        team_points[team] += pts
+
+                # aggregated successfully (info suppressed)
+            except Exception as exc:
+                _log(f"[results] ERROR loading rnd={rnd} code={code}: {exc}")
+                continue
+
+    # Prepare drivers table lines
+    left_lines: list[str] = []
+    d_header = f"{'Pos':>{POSW}}  {'Driver':<{DNAMEW}}  {'Nat':<{NATW}}  {'Team':<{TNAMEW}}  {'Pts':>{PTSW}}"
+    left_lines.append(d_header)
+    left_hr = "-" * len(d_header)
+    left_lines.append(left_hr)
+
+    # Sort drivers by points desc, then by name
+    drivers_sorted = sorted(
+        driver_points.items(),
+        key=lambda kv: (kv[1], driver_name.get(kv[0], "")),
+        reverse=True,
+    )
+
+    d_count = 0
+    pos_counter = 1
+    for abbr, pts in drivers_sorted:
+        name = driver_name.get(abbr, abbr)
+        nat = driver_nat.get(abbr, "")
+        team = driver_team.get(abbr, "")
+        left_lines.append(
+            f"{pos_counter:>{POSW}}  {clip(name, DNAMEW):<{DNAMEW}}  {clip(nat, NATW):<{NATW}}  {clip(team, TNAMEW):<{TNAMEW}}  {int(pts) if float(pts).is_integer() else round(pts,1):>{PTSW}}"
+        )
+        d_count += 1
+        pos_counter += 1
+    if d_count:
+        left_lines.append(left_hr)
+
+    # Prepare teams table lines
+    right_lines: list[str] = []
+    t_header = f"{'Pos':>{T_POSW}}  {'Team':<{T_TEAMW}}  {'Pts':>{T_PTSW}}"
+    right_lines.append(t_header)
+    right_hr = "-" * len(t_header)
+    right_lines.append(right_hr)
+
+    teams_sorted = sorted(team_points.items(), key=lambda kv: kv[1], reverse=True)
+    t_count = 0
+    pos_counter = 1
+    for team, pts in teams_sorted:
+        right_lines.append(
+            f"{pos_counter:>{T_POSW}}  {clip(team, T_TEAMW):<{T_TEAMW}}  {int(pts) if float(pts).is_integer() else round(pts,1):>{T_PTSW}}"
+        )
+        t_count += 1
+        pos_counter += 1
+    if t_count:
+        right_lines.append(right_hr)
+
+    # No data handling
+    if d_count == 0 and t_count == 0:
+        _log(
+            f"[results] WARN: No data aggregated for {year}; rounds_processed={rounds_processed}, sessions_loaded={sessions_loaded}"
+        )
+        return f"No data Available for {year} F1 Season..."
+
+    # Compose side-by-side lines
+    left_width = len(d_header)
+    right_width = len(t_header)
+    gutter = " " * GUTTER
+
+    lines: list[str] = [title]
+
+    def pad_line(s: str, width: int) -> str:
+        if len(s) >= width:
+            return s[:width]
+        return s + (" " * (width - len(s)))
+
+    max_rows = max(len(left_lines), len(right_lines))
+    from itertools import zip_longest
+    for l, r in zip_longest(left_lines, right_lines, fillvalue=""):
+        lines.append(f"{pad_line(l, left_width)}{gutter}{pad_line(r, right_width)}")
+
+    return "\n".join(lines)
 
 
 def sessions(ctx: Context) -> str:
@@ -517,7 +822,7 @@ def calendar(ctx: Context) -> str:
 MENU_ACTIONS = {
     "Live": live_timing,
     "Drivers": drivers,
-    "Constructors": constructors,
+    "Results": results,
     "Sessions": sessions,
     "Calendar": calendar,
     "Settings": settings,

@@ -42,7 +42,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
     menu_items: List[Tuple[str, callable]] = [
         ("Live", acts.live_timing),
         ("Drivers", acts.drivers),
-        ("Constructors", acts.constructors),
+        ("Results", acts.results),
         ("Sessions", acts.sessions),
         ("Calendar", acts.calendar),
         ("Settings", acts.settings),
@@ -69,6 +69,14 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_CYAN)
                 # Dropdown background (simulate darker cyan by using cyan + dim attribute)
                 curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_CYAN)
+                # Loading notice colors
+                # pair 7: red on default (unused now)
+                try:
+                    curses.init_pair(7, curses.COLOR_RED, -1)
+                except curses.error:
+                    curses.init_pair(7, curses.COLOR_RED, curses.COLOR_BLACK)
+                # pair 8: red text on black background (explicit)
+                curses.init_pair(8, curses.COLOR_RED, curses.COLOR_BLACK)
                 has_colors = True
         except curses.error:
             has_colors = False
@@ -137,6 +145,92 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             stdscr.addstr(h - 1, 1, help_text[: max(0, w - 2)])
 
         stdscr.refresh()
+
+    def _run_with_loading(stdscr, message: str, fn) -> str:
+        """Run a potentially long-running function in a thread while showing a
+        fixed loading notice above the help footer: "Loading {year} Data...Please Wait !!".
+
+        Returns the function's result string (or error message).
+        """
+        import threading
+        import time
+
+        # Try to ensure color pair for red text on black exists; ignore failures on no-color terms
+        try:
+            import curses  # local
+            if hasattr(curses, "has_colors") and curses.has_colors():
+                curses.start_color()
+                curses.use_default_colors()
+                try:
+                    curses.init_pair(8, curses.COLOR_RED, curses.COLOR_BLACK)
+                except curses.error:
+                    pass
+        except Exception:
+            pass
+
+        result: Dict[str, Optional[str]] = {"val": None}
+
+        def _worker():
+            try:
+                out = fn()
+                result["val"] = out if isinstance(out, str) else ("" if out is None else str(out))
+            except Exception as exc:  # pragma: no cover
+                result["val"] = f"Error: {exc}"
+
+        th = threading.Thread(target=_worker, daemon=True)
+        th.start()
+
+        # Make getch non-blocking while we animate the footer
+        try:
+            prev_nodelay = stdscr.nodelay(True)
+        except Exception:
+            prev_nodelay = False
+
+        try:
+            while th.is_alive():
+                h, w = stdscr.getmaxyx()
+                try:
+                    # Draw help on bottom line remains; we draw loading on the line above it
+                    # Clear the loading line first
+                    y = max(0, h - 2)
+                    stdscr.addstr(y, 0, " " * max(0, w))
+                    text = (message or "").strip()
+                    if text:
+                        if hasattr(curses, "has_colors") and curses.has_colors():
+                            stdscr.attron(curses.color_pair(8))
+                        stdscr.addstr(y, 1, text[: max(0, w - 2)])
+                        if hasattr(curses, "has_colors") and curses.has_colors():
+                            stdscr.attroff(curses.color_pair(8))
+                    stdscr.refresh()
+                except Exception:
+                    pass
+
+                # Eat resize events so the footer stays at the bottom
+                try:
+                    ch = stdscr.getch()
+                    if ch == curses.KEY_RESIZE:
+                        # will recompute h,w on next loop
+                        pass
+                except Exception:
+                    pass
+
+                time.sleep(0.05)
+        finally:
+            try:
+                stdscr.nodelay(prev_nodelay)
+            except Exception:
+                pass
+        # Clear the loading line once done
+        try:
+            h, w = stdscr.getmaxyx()
+            y = max(0, h - 2)
+            stdscr.addstr(y, 0, " " * max(0, w))
+            stdscr.refresh()
+        except Exception:
+            pass
+
+        th.join(timeout=0.1)
+        return result["val"] or ""
 
     def select_year(
         stdscr,
@@ -313,7 +407,26 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                         )
                         if chosen is not None:
                             context["season"] = chosen
-                        status = action(context) or ""
+                        # Show blinking loading footer while fetching
+                        year = context.get("season")
+                        msg = f"Loading {year} Data...Please Wait !!"
+                        status = _run_with_loading(stdscr, msg, lambda: action(context)) or ""
+                    elif label == "Results":
+                        # Same selector as Drivers (2018+ only, previous 20 years)
+                        chosen = select_year(
+                            stdscr,
+                            None,
+                            include_next_year=False,
+                            count_previous=20,
+                            title_text="Select Season",
+                            min_year=2018,
+                        )
+                        if chosen is not None:
+                            context["season"] = chosen
+                        # Show blinking loading footer while computing
+                        year = context.get("season")
+                        msg = f"Loading {year} Data...Please Wait !!"
+                        status = _run_with_loading(stdscr, msg, lambda: action(context)) or ""
                     else:
                         status = action(context) or ""
                 except Exception as e:  # pragma: no cover
