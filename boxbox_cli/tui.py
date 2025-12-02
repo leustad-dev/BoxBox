@@ -138,8 +138,21 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
 
         stdscr.refresh()
 
-    def select_year(stdscr, base_year: Optional[int] = None) -> Optional[int]:
-        """Show a dropdown menu listing the last 10 years and return the chosen year.
+    def select_year(
+        stdscr,
+        base_year: Optional[int] = None,
+        *,
+        include_next_year: bool = True,
+        count_previous: int = 10,
+        title_text: str = "Select Year",
+        show_next_label: str = "Next Year",
+        min_year: Optional[int] = None,
+    ) -> Optional[int]:
+        """Show a dropdown menu of years and return the chosen year.
+
+        - include_next_year: if True, put next calendar year first (labeled by show_next_label)
+        - count_previous: how many years to include starting from current year going backwards
+        - title_text: title displayed at the top of the dropdown window
 
         Controls: Up/Down or j/k to move, Enter to select, ESC/q to cancel.
         Returns the selected year or None if canceled.
@@ -151,13 +164,17 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         except Exception:
             pass
 
-        # Determine list of years: always show Next Year first, then current year
-        # and nine more previous years (total 11 items).
+        # Determine list of years based on options
         import datetime as _dt
         curr_year = _dt.date.today().year
         next_year = curr_year + 1
-        years = [next_year] + [curr_year - i for i in range(10)]  # e.g., 2026, 2025..2016
-        labels_display = ["Next Year"] + [str(y) for y in years[1:]]
+        base = curr_year if base_year is None else int(base_year)
+        # Always compute relative to actual current year for consistent UI behavior
+        prev_years = [curr_year - i for i in range(count_previous)]
+        if min_year is not None:
+            prev_years = [y for y in prev_years if y >= int(min_year)]
+        years = ([next_year] if include_next_year else []) + prev_years
+        labels_display = ([show_next_label] if include_next_year else []) + [str(y) for y in prev_years]
         sel_idx = 0
 
         # Dimensions for the dropdown window
@@ -181,7 +198,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             except Exception:
                 pass
 
-            title = "Select Year"
+            title = title_text
             try:
                 win.addnstr(0, max(1, (list_width - len(title)) // 2), title, list_width - 2)
             except Exception:
@@ -283,6 +300,19 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                         if chosen is not None:
                             context["season"] = chosen
                         # After selection (or cancel), render calendar with current context
+                        status = action(context) or ""
+                    elif label == "Drivers":
+                        # Show prior years but not before 2018; no next year entry
+                        chosen = select_year(
+                            stdscr,
+                            None,
+                            include_next_year=False,
+                            count_previous=20,
+                            title_text="Select Season",
+                            min_year=2018,
+                        )
+                        if chosen is not None:
+                            context["season"] = chosen
                         status = action(context) or ""
                     else:
                         status = action(context) or ""

@@ -21,7 +21,209 @@ def live_timing(ctx: Context) -> str:
 
 
 def drivers(ctx: Context) -> str:
-    return "Drivers selected (stub)"
+    """Show drivers grouped by team for a selected year (2018+ only).
+
+    - Uses FastF1 session results (minimal load) to get full driver names and team names.
+    - No fallback for <2018 per request; those seasons are not selectable in the UI anymore.
+    - Renders a fixed-width table similar to the Calendar view.
+    """
+    try:
+        year = int(ctx.get("season") or date.today().year)
+    except Exception:
+        year = date.today().year
+
+    title = f"F1 {year} Drivers by Team"
+    TW, DW = 22, 26  # team width, driver width
+
+    def clip(val: object, width: int) -> str:
+        s = "" if val is None else str(val)
+        return s if len(s) <= width else s[:width]
+
+    header = f"{'Team':<{TW}}  {'Driver':<{DW}}"
+    rule_len = max(len(title), len(header))
+    hr = "-" * rule_len
+
+    # Disallow seasons before 2018 (no fallback desired)
+    if year < 2018:
+        return "Driver lineup data is only available from 2018 onwards."
+
+    # Result collector: list of (team, driver)
+    pairs: list[tuple[str, str]] = []
+
+    # Try FastF1 backend for modern seasons (>=2018)
+    try:
+        # Helper: pick the latest completed session in this season based on the schedule
+        def _pick_latest_session_code(year: int) -> Optional[tuple[int, str]]:
+            try:
+                schedule = fastf1.get_event_schedule(year)
+            except Exception:
+                return None
+
+            try:
+                import pandas as _pd  # type: ignore
+            except Exception:  # pragma: no cover
+                _pd = None  # type: ignore
+
+            # Collect all sessions with their UTC timestamps
+            candidates: list[tuple[datetime, int, str]] = []  # (dt_utc, round, code)
+
+            # Identify name and date columns
+            cols = list(getattr(schedule, 'columns', []))
+            name_cols = [c for c in cols if c.startswith('Session') and c[-1:].isdigit() and not c.endswith('Utc') and not c.endswith('DateUtc')]
+
+            def _map_name_to_code(name: str) -> Optional[str]:
+                n = name.strip().lower()
+                if not n:
+                    return None
+                # Prefer specific competitive sessions
+                if 'sprint shootout' in n or n == 'sprint shootout' or 'sprint qualifying' in n:
+                    return 'SQ'
+                if n == 'sprint' or (('sprint' in n) and ('qual' not in n) and ('shootout' not in n)):
+                    return 'S'
+                if n == 'qualifying' or (('qualifying' in n) and ('sprint' not in n)):
+                    return 'Q'
+                if n == 'race' or 'grand prix' in n or 'grandprix' in n:
+                    return 'R'
+                if 'practice 3' in n or 'fp3' in n:
+                    return 'FP3'
+                if 'practice 2' in n or 'fp2' in n:
+                    return 'FP2'
+                if 'practice 1' in n or 'fp1' in n:
+                    return 'FP1'
+                return None
+
+            # Build candidates list
+            for _, row in schedule.iterrows():
+                # Round number can be int or str
+                rnd_val = row.get('RoundNumber', None)
+                try:
+                    rnd = int(rnd_val)
+                except Exception:
+                    # if not convertible, skip (we need numeric round to query)
+                    continue
+                for nc in name_cols:
+                    name_val = str(row.get(nc, '') or '')
+                    code = _map_name_to_code(name_val)
+                    if not code:
+                        continue
+                    idx = nc[len('Session'):]
+                    dcol = f'Session{idx}DateUtc'
+                    if dcol not in cols:
+                        continue
+                    dt_val = row.get(dcol, None)
+                    if dt_val is None:
+                        continue
+                    dt_utc: Optional[datetime]
+                    try:
+                        if _pd is not None and isinstance(dt_val, _pd.Timestamp):
+                            if dt_val.tzinfo is None:
+                                dt_val = dt_val.tz_localize('UTC')
+                            dt_utc = dt_val.tz_convert('UTC').to_pydatetime()
+                        elif isinstance(dt_val, datetime):
+                            dt_utc = dt_val if dt_val.tzinfo else dt_val.replace(tzinfo=timezone.utc)
+                        else:
+                            continue
+                    except Exception:
+                        continue
+                    candidates.append((dt_utc, rnd, code))
+
+            if not candidates:
+                return None
+
+            # Filter to sessions that have started already
+            now_utc = datetime.now(timezone.utc)
+            candidates = [c for c in candidates if c[0] <= now_utc]
+            if not candidates:
+                return None
+
+            # Sort by time descending, but enforce session code priority for same timestamp
+            priority = {'R': 6, 'Q': 5, 'S': 4, 'SQ': 3, 'FP3': 2, 'FP2': 1, 'FP1': 0}
+            candidates.sort(key=lambda x: (x[0], priority.get(x[2], -1)), reverse=True)
+            # Take the top candidate
+            _, rnd_best, code_best = candidates[0]
+            return rnd_best, code_best
+
+        latest = _pick_latest_session_code(year)
+        if latest is not None:
+            rnd, code = latest
+            try:
+                sess = fastf1.get_session(year, rnd, code)
+                # Minimal load to get results table
+                sess.load(telemetry=False, laps=False, weather=False)
+                df = getattr(sess, "results", None)
+                if df is not None and not getattr(df, "empty", False):
+                    name_col = "FullName" if "FullName" in df.columns else (
+                        "DriverName" if "DriverName" in df.columns else (
+                            "Driver" if "Driver" in df.columns else "Abbreviation"
+                        )
+                    )
+                    team_col = "TeamName" if "TeamName" in df.columns else (
+                        "Team" if "Team" in df.columns else None
+                    )
+                    if team_col is None:
+                        # Try loading light laps to map teams
+                        try:
+                            sess.load(telemetry=False, laps=True, weather=False)
+                            laps = getattr(sess, "laps", None)
+                            if laps is not None and not laps.empty:
+                                latest_laps = laps.groupby("Driver").last()
+                                team_map = latest_laps["Team"].to_dict() if "Team" in latest_laps.columns else {}
+                                for _, r in df.iterrows():
+                                    name = str(r.get(name_col, "")).strip()
+                                    abbr = str(r.get("Abbreviation", "")).strip()
+                                    team = team_map.get(abbr, "")
+                                    if name and team:
+                                        pairs.append((team, name))
+                        except Exception:
+                            pass
+                    else:
+                        for _, r in df.iterrows():
+                            name = str(r.get(name_col, "")).strip()
+                            team = str(r.get(team_col, "")).strip()
+                            if name and team:
+                                pairs.append((team, name))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # No fallback requested; if nothing found, return no-data message
+
+    if not pairs:
+        return f"No driver/team data Available for {year} F1 Season..."
+
+    # Group by team name
+    from collections import defaultdict
+
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for team, driver in pairs:
+        if driver not in grouped[team]:
+            grouped[team].append(driver)
+
+    # Sort teams alphabetically, drivers alphabetically within team
+    for t in list(grouped.keys()):
+        grouped[t] = sorted(grouped[t], key=lambda s: s.lower())
+
+    teams_sorted = sorted(grouped.keys(), key=lambda s: s.lower())
+
+    # Note for older seasons
+    note = None
+    if year < 2018:
+        note = "Older data before 2018 is not accurate due to API limitation"
+
+    lines: list[str] = ([note] if note else []) + [title, header, hr]
+    for team in teams_sorted:
+        drivers_list = grouped[team]
+        if not drivers_list:
+            continue
+        # First row with team name
+        lines.append(f"{clip(team, TW):<{TW}}  {clip(drivers_list[0], DW):<{DW}}")
+        # Subsequent rows: leave team column blank
+        for d in drivers_list[1:]:
+            lines.append(f"{'':<{TW}}  {clip(d, DW):<{DW}}")
+        lines.append(hr)
+
+    return "\n".join(lines)
 
 
 def constructors(ctx: Context) -> str:
