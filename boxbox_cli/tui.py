@@ -67,6 +67,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_BLACK)
                 # Menu label text (black on cyan) per request for high contrast
                 curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_CYAN)
+                # Dropdown background (simulate darker cyan by using cyan + dim attribute)
+                curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_CYAN)
                 has_colors = True
         except curses.error:
             has_colors = False
@@ -136,6 +138,114 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
 
         stdscr.refresh()
 
+    def select_year(stdscr, base_year: Optional[int] = None) -> Optional[int]:
+        """Show a dropdown menu listing the last 10 years and return the chosen year.
+
+        Controls: Up/Down or j/k to move, Enter to select, ESC/q to cancel.
+        Returns the selected year or None if canceled.
+        """
+        h, w = stdscr.getmaxyx()
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+        except Exception:
+            pass
+
+        # Determine list of years: always show Next Year first, then current year
+        # and nine more previous years (total 11 items).
+        import datetime as _dt
+        curr_year = _dt.date.today().year
+        next_year = curr_year + 1
+        years = [next_year] + [curr_year - i for i in range(10)]  # e.g., 2026, 2025..2016
+        labels_display = ["Next Year"] + [str(y) for y in years[1:]]
+        sel_idx = 0
+
+        # Dimensions for the dropdown window
+        list_width = max(18, max(len(s) for s in labels_display) + 6)  # padding
+        list_height = len(years) + 2  # borders/padding
+        start_y = max(1, (h - list_height) // 3)
+        start_x = max(2, (w - list_width) // 2)
+
+        # Create a subwindow for the dropdown
+        win = stdscr.derwin(list_height, list_width, start_y, start_x)
+        win.keypad(True)
+
+        def _draw_dropdown():
+            try:
+                win.erase()
+            except Exception:
+                pass
+            # Frame
+            try:
+                win.box()
+            except Exception:
+                pass
+
+            title = "Select Year"
+            try:
+                win.addnstr(0, max(1, (list_width - len(title)) // 2), title, list_width - 2)
+            except Exception:
+                pass
+
+            for i, y in enumerate(years):
+                disp = labels_display[i]
+                label = f"  {disp}  "
+                try:
+                    if curses.has_colors():
+                        if i == sel_idx:
+                            # Selected line: black on cyan + bold for visibility
+                            win.attron(curses.color_pair(5))
+                            win.attron(curses.A_BOLD)
+                            win.addnstr(1 + i, 1, label.ljust(list_width - 2), list_width - 2)
+                            win.attroff(curses.A_BOLD)
+                            win.attroff(curses.color_pair(5))
+                        else:
+                            # Unselected: use dim attribute to simulate darker background effect
+                            win.attron(curses.A_DIM)
+                            win.addnstr(1 + i, 1, label.ljust(list_width - 2), list_width - 2)
+                            win.attroff(curses.A_DIM)
+                    else:
+                        # No color support
+                        marker = ">" if i == sel_idx else " "
+                        win.addnstr(1 + i, 1, f"{marker} {disp}".ljust(list_width - 2), list_width - 2)
+                except curses.error:
+                    pass
+
+            try:
+                win.noutrefresh()
+                stdscr.noutrefresh()
+                curses.doupdate()
+            except Exception:
+                pass
+
+        _draw_dropdown()
+
+        while True:
+            ch = stdscr.getch()
+            if ch in (27, ord('q')):  # ESC or q
+                return None
+            elif ch in (curses.KEY_UP, ord('k')):
+                sel_idx = (sel_idx - 1) % len(years)
+                _draw_dropdown()
+            elif ch in (curses.KEY_DOWN, ord('j')):
+                sel_idx = (sel_idx + 1) % len(years)
+                _draw_dropdown()
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                return years[sel_idx]
+            elif ch == curses.KEY_RESIZE:
+                # Recompute geometry on resize
+                h, w = stdscr.getmaxyx()
+                list_height_new = len(years) + 2
+                list_width_new = list_width
+                start_y_new = max(1, (h - list_height_new) // 3)
+                start_x_new = max(2, (w - list_width_new) // 2)
+                try:
+                    win.mvwin(start_y_new, start_x_new)
+                    win.resize(list_height_new, list_width_new)
+                except Exception:
+                    pass
+                _draw_dropdown()
+
     def main(stdscr):
         # Basic curses setup
         curses.curs_set(0)
@@ -150,7 +260,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             pass
 
         selected = 0
-        status = "Welcome to BoxBox CLI (framework)."
+        status = "Welcome to BoxBox CLI.\nA Formula 1 data tracker for the command line."
         draw(stdscr, selected, status)
 
         while True:
@@ -165,8 +275,17 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             elif ch in (curses.KEY_ENTER, 10, 13):
                 # Execute the selected action
                 try:
-                    _, action = menu_items[selected]
-                    status = action(context) or ""
+                    label, action = menu_items[selected]
+                    if label == "Calendar":
+                        # Show year selector with last 10 years; always base on current year
+                        # so the dropdown consistently lists [current .. current-9]
+                        chosen = select_year(stdscr, None)
+                        if chosen is not None:
+                            context["season"] = chosen
+                        # After selection (or cancel), render calendar with current context
+                        status = action(context) or ""
+                    else:
+                        status = action(context) or ""
                 except Exception as e:  # pragma: no cover
                     status = f"Error: {e}"
             elif ch == curses.KEY_RESIZE:

@@ -1,7 +1,8 @@
 """Placeholder menu action handlers for BoxBox TUI.
 
 Each handler receives a context dict (may include season, round, session)
-and returns a short status string to display in the TUI. For now, they are stubs.
+and returns a short status string to display in the TUI. Some handlers are
+still stubs; calendar renders a formatted table.
 """
 from __future__ import annotations
 
@@ -40,9 +41,13 @@ def help_about(ctx: Context) -> str:
 
 
 def calendar(ctx: Context) -> str:
-    """Fetch and format the current season calendar using FastF1.
+    """Fetch and format the season calendar using FastF1.
 
-    Returns a multi-line string suitable for the TUI status area.
+    - Shows a fixed-width table with columns:
+      Rnd, Country, Location, Sprint Qual, Sprint, Race Qual, Race
+    - Uses sprint columns only from 2021 onwards.
+    - For seasons < 2018, uses Ergast backend implicitly (or explicitly here)
+      and falls back to available date columns.
     """
     try:
         year = int(ctx.get("season") or date.today().year)
@@ -50,117 +55,119 @@ def calendar(ctx: Context) -> str:
         year = date.today().year
 
     try:
-        schedule = fastf1.get_event_schedule(year)
+        backend = None if year >= 2018 else "ergast"
+        schedule = fastf1.get_event_schedule(year, backend=backend)
     except Exception as exc:
         return f"Failed to load schedule for {year}: {exc}"
 
-    # Prefer the requested columns; fall back to older formatting if missing
+    # If no data is available for the requested year, show a friendly message
+    no_data_msg = f"No data Available for {year} F1 Season..."
+    try:
+        if schedule is None:
+            return no_data_msg
+        # EventSchedule behaves like a pandas DataFrame
+        if hasattr(schedule, "empty") and schedule.empty:
+            return no_data_msg
+        # Fallback length check
+        try:
+            if len(schedule) == 0:  # type: ignore[arg-type]
+                return no_data_msg
+        except Exception:
+            pass
+    except Exception:
+        # If any unexpected error occurs while checking, proceed; later formatting
+        # safeguards will still catch the empty case by counting rendered rows.
+        pass
+
+    # Optional pandas (comes with fastf1)
+    try:
+        import pandas as pd  # type: ignore
+    except Exception:  # pragma: no cover
+        pd = None  # type: ignore
+
+    def to_local(ts):
+        try:
+            local_tz = datetime.now().astimezone().tzinfo
+            if pd is not None and isinstance(ts, pd.Timestamp):
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                return ts.tz_convert(local_tz)
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts.astimezone(local_tz)
+        except Exception:
+            pass
+        return ts
+
+    def _abbr_tz(tz_name: Optional[str], dt_obj) -> str:
+        try:
+            name = (tz_name or "").strip()
+            if name:
+                if " " in name:
+                    parts = [p for p in name.replace("(", " ").replace(")", " ").split() if p.isalpha()]
+                    if parts:
+                        return "".join(p[0].upper() for p in parts)
+                return name
+            if hasattr(dt_obj, "utcoffset") and dt_obj.utcoffset() is not None:
+                offset = dt_obj.utcoffset()
+                total_minutes = int(offset.total_seconds() // 60)
+                sign = "+" if total_minutes >= 0 else "-"
+                total_minutes = abs(total_minutes)
+                hh = total_minutes // 60
+                mm = total_minutes % 60
+                return f"UTC{sign}{hh:02d}:{mm:02d}"
+        except Exception:
+            pass
+        return "UTC"
+
+    def format_local(dt_obj) -> str:
+        loc = to_local(dt_obj)
+        try:
+            tz_name = loc.tzname() if hasattr(loc, "tzname") else None
+            abbr = _abbr_tz(tz_name, loc)
+            if hasattr(loc, "strftime"):
+                return loc.strftime("%b %d %Y %H:%M ") + abbr
+            return str(loc)
+        except Exception:
+            return str(loc) if loc is not None else ""
+
+    # Fixed widths to keep alignment; clip long values
+    title = f"F1 {year} Calendar"
+    CW, LW, RW, SW, SQW, QW = 16, 18, 20, 16, 16, 16
+
+    def clip(val: object, width: int) -> str:
+        s = "" if val is None else str(val)
+        if len(s) <= width:
+            return s
+        return s[:width]
+
+    header = (
+        f"{'Rnd':>3}  {'Country':<{CW}}  {'Location':<{LW}}  "
+        f"{'Sprint Qual':<{SQW}}  {'Sprint':<{SW}}  {'Race Qual':<{QW}}  {'Race':<{RW}}"
+    )
+    rule_len = max(len(header), len(title))
+    hr = "-" * rule_len
+    lines = [title, header, hr]
+
     cols = set(schedule.columns)
-    has_required = {"RoundNumber", "Country", "Session5DateUtc"}.issubset(cols)
+    modern = {"RoundNumber", "Country", "Session5DateUtc"}.issubset(cols)
 
-    if has_required:
+    if modern:
+        # Modern schema (2018+ with FastF1 backend). Detect sessions by scanning names
         try:
-            import pandas as pd  # type: ignore
-        except Exception:  # pragma: no cover - pandas comes with fastf1
-            pd = None  # type: ignore
-
-        def to_local(ts):
-            try:
-                local_tz = datetime.now().astimezone().tzinfo
-                if pd is not None and isinstance(ts, pd.Timestamp):
-                    if ts.tzinfo is None:
-                        ts = ts.tz_localize("UTC")
-                    return ts.tz_convert(local_tz)
-                if isinstance(ts, datetime):
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    return ts.astimezone(local_tz)
-            except Exception:
-                pass
-            return ts
-
-        def _abbr_tz(tz_name: Optional[str], dt_obj) -> str:
-            """Return a short timezone abbreviation.
-
-            - If tz_name has spaces (e.g., "Central Standard Time"), compress to initials ("CST").
-            - If tz_name already looks short (no space), return as-is.
-            - If tz_name is None/empty, fall back to a numeric offset like UTC+HH:MM.
-            """
-            try:
-                name = (tz_name or "").strip()
-                if name:
-                    if " " in name:
-                        # Compress multi-word names to initials
-                        parts = [p for p in name.replace("(", " ").replace(")", " ").split() if p.isalpha()]
-                        if parts:
-                            return "".join(p[0].upper() for p in parts)
-                    # Already an abbreviation
-                    return name
-                # No tz name -> compute offset
-                # Support pandas.Timestamp and datetime
-                if hasattr(dt_obj, "utcoffset") and dt_obj.utcoffset() is not None:
-                    offset = dt_obj.utcoffset()
-                    total_minutes = int(offset.total_seconds() // 60)
-                    sign = "+" if total_minutes >= 0 else "-"
-                    total_minutes = abs(total_minutes)
-                    hh = total_minutes // 60
-                    mm = total_minutes % 60
-                    return f"UTC{sign}{hh:02d}:{mm:02d}"
-            except Exception:
-                pass
-            return "UTC"
-
-        def format_local(dt_obj) -> str:
-            """Format a UTC datetime to local with abbreviated timezone."""
-            loc = to_local(dt_obj)
-            try:
-                if hasattr(loc, "tzname"):
-                    tz_name = loc.tzname()
-                else:
-                    tz_name = None
-                abbr = _abbr_tz(tz_name, loc)
-                if hasattr(loc, "strftime"):
-                    return loc.strftime("%b %d %Y %H:%M ") + abbr
-                return str(loc)
-            except Exception:
-                return str(loc) if loc is not None else ""
-
-        # Build a neat header with explicit column names (include Location)
-        title = f"F1 {year} Calendar"
-        # Define fixed column widths and a safe clipper to avoid shifting when values are long
-        # Country, Location, Race, Sprint, Sprint Qual, Qualifying widths
-        CW, LW, RW, SW, SQW, QW = 16, 18, 20, 16, 16, 16
-
-        def clip(val: object, width: int) -> str:
-            s = "" if val is None else str(val)
-            if len(s) <= width:
-                return s
-            # Prefer hard clip instead of ellipsis to keep alignment perfectly consistent
-            return s[:width]
-
-        header = (
-            f"{'Rnd':>3}  {'Country':<{CW}}  {'Location':<{LW}}  "
-            f"{'Sprint Qual':<{SQW}}  {'Sprint':<{SW}}  {'Race Qual':<{QW}}  {'Race':<{RW}}"
-        )
-        rule_len = max(len(header), len(title))
-        hr = "-" * rule_len  # ASCII rule for broad terminal compatibility
-        lines = [title, header, hr]
-
-        try:
-            # Ensure sorted by round number if possible
+            events_count = 0
             try:
                 schedule_sorted = schedule.sort_values("RoundNumber")
             except Exception:
                 schedule_sorted = schedule
 
-            # Pre-compute which Session column stores specific sessions by scanning names
-            session_name_cols = [c for c in schedule_sorted.columns if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")]
+            session_name_cols = [
+                c for c in schedule_sorted.columns
+                if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")
+            ]
 
             def _find_session_dt(row, matchers):
-                """Generic helper to find a session date column by name.
-                `matchers` is a list of callables that accept a lowercase session name
-                and return True if it matches the desired session.
-                """
                 chosen_idx = None
                 for c in sorted(session_name_cols):
                     name = str(row.get(c, ""))
@@ -176,7 +183,6 @@ def calendar(ctx: Context) -> str:
                 return chosen_idx
 
             def find_quali_dt(row):
-                # Qualifying (exclude sprint shootout)
                 return _find_session_dt(
                     row,
                     [
@@ -186,7 +192,6 @@ def calendar(ctx: Context) -> str:
                 )
 
             def find_sprint_dt(row):
-                # Sprint race (not sprint qualifying/shootout)
                 return _find_session_dt(
                     row,
                     [
@@ -196,7 +201,6 @@ def calendar(ctx: Context) -> str:
                 )
 
             def find_sprint_quali_dt(row):
-                # Sprint Qualifying (older naming) or Sprint Shootout (newer naming)
                 return _find_session_dt(
                     row,
                     [
@@ -219,68 +223,90 @@ def calendar(ctx: Context) -> str:
                 dt_utc = row.get("Session5DateUtc", None)
                 local_str = clip(format_local(dt_utc), RW)
 
-                # Sprint time (if available)
-                sprint_col = find_sprint_dt(row)
-                if sprint_col:
-                    s_dt_utc = row.get(sprint_col, None)
-                    sprint_str = clip(format_local(s_dt_utc), SW)
-                else:
-                    sprint_str = "-"
+                sprint_str = "-"
+                sprint_q_str = "-"
+                if year >= 2021:
+                    s_col = find_sprint_dt(row)
+                    if s_col:
+                        sprint_str = clip(format_local(row.get(s_col, None)), SW)
+                    sq_col = find_sprint_quali_dt(row)
+                    if sq_col:
+                        sprint_q_str = clip(format_local(row.get(sq_col, None)), SQW)
 
-                # Sprint Qualifying / Shootout time (if available)
-                sprint_q_col = find_sprint_quali_dt(row)
-                if sprint_q_col:
-                    sq_dt_utc = row.get(sprint_q_col, None)
-                    sprint_q_str = clip(format_local(sq_dt_utc), SQW)
-                else:
-                    sprint_q_str = "-"
-
-                # Qualifying time (if available)
-                quali_col = find_quali_dt(row)
-                if quali_col:
-                    q_dt_utc = row.get(quali_col, None)
-                    quali_str = clip(format_local(q_dt_utc), QW)
+                q_col = find_quali_dt(row)
+                if q_col:
+                    quali_str = clip(format_local(row.get(q_col, None)), QW)
                 else:
                     quali_str = "-"
 
                 lines.append(
                     f"{rn:>3}  {country:<{CW}}  {location:<{LW}}  {sprint_q_str:<{SQW}}  {sprint_str:<{SW}}  {quali_str:<{QW}}  {local_str:<{RW}}"
                 )
-                # Row separator for table-like readability
                 lines.append(hr)
+                events_count += 1
         except Exception as exc:
             return f"Loaded schedule for {year}, but formatting failed: {exc}"
 
+        # If nothing was rendered, inform the user rather than showing an empty table
+        if events_count == 0:
+            return no_data_msg
         return "\n".join(lines)
 
-    # Fallback to previous, more permissive formatting
-    use_event = "EventName" if "EventName" in cols else ("OfficialEventName" if "OfficialEventName" in cols else None)
-    use_country = "Country" if "Country" in cols else None
-    use_round = "RoundNumber" if "RoundNumber" in cols else None
-    use_date = "EventDate" if "EventDate" in cols else ("EventStartDate" if "EventStartDate" in cols else None)
-
-    lines = [f"F1 {year} Calendar"]
+    # Legacy/Ergast fallback: try to mimic the same columns with what's available
     try:
-        for _, row in schedule.iterrows():
-            rn = str(row[use_round]) if use_round else ""
-            name = str(row[use_event]) if use_event else ""
-            country = str(row[use_country]) if use_country else ""
-            dt = row[use_date] if use_date else None
-            try:
-                dts = dt.strftime("%b %d") if hasattr(dt, "strftime") else (str(dt) if dt is not None else "")
-            except Exception:
-                dts = str(dt) if dt is not None else ""
+        events_count = 0
+        try:
+            schedule_sorted = schedule.sort_values("RoundNumber")
+        except Exception:
+            schedule_sorted = schedule
 
-            label = name or country
-            prefix = f"{rn:>2}. " if rn else " - "
-            suffix = f"  ({dts})" if dts else ""
-            if country and name and country not in name:
-                label = f"{country} — {name}"
-            elif not label:
-                label = "Event"
-            lines.append(f"{prefix}{label}{suffix}")
+        def find_col_contains(*need):
+            for c in schedule_sorted.columns:
+                lc = c.lower()
+                if all(n in lc for n in need):
+                    return c
+            return None
+
+        race_date_col = (
+            ("RaceDate" if "RaceDate" in schedule_sorted.columns else None)
+            or find_col_contains("race", "date")
+            or ("EventDate" if "EventDate" in schedule_sorted.columns else None)
+            or ("EventStartDate" if "EventStartDate" in schedule_sorted.columns else None)
+        )
+        quali_date_col = (
+            ("QualifyingDate" if "QualifyingDate" in schedule_sorted.columns else None)
+            or find_col_contains("qualifying", "date")
+        )
+
+        for _, row in schedule_sorted.iterrows():
+            rn_val = row.get("RoundNumber", "")
+            try:
+                rn = int(rn_val)
+            except Exception:
+                rn = rn_val
+
+            country = clip(row.get("Country", ""), CW)
+            location = clip(str(row.get("Location", "")) or "-", LW)
+
+            race_dt = row.get(race_date_col, None) if race_date_col else None
+            race_str = clip(format_local(race_dt), RW) if race_dt is not None else "-"
+
+            sprint_str = "-"  # not applicable pre-2021
+            sprint_q_str = "-"
+
+            quali_dt = row.get(quali_date_col, None) if quali_date_col else None
+            quali_str = clip(format_local(quali_dt), QW) if quali_dt is not None else "-"
+
+            lines.append(
+                f"{rn:>3}  {country:<{CW}}  {location:<{LW}}  {sprint_q_str:<{SQW}}  {sprint_str:<{SW}}  {quali_str:<{QW}}  {race_str:<{RW}}"
+            )
+            lines.append(hr)
+            events_count += 1
     except Exception as exc:
         return f"Loaded schedule for {year}, but formatting failed: {exc}"
+
+    if events_count == 0:
+        return no_data_msg
 
     return "\n".join(lines)
 
