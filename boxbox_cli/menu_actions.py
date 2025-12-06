@@ -83,15 +83,10 @@ def drivers(ctx: Context) -> str:
         year = date.today().year
 
     title = f"F1 {year} Drivers by Team"
-    TW, DW = 22, 26  # team width, driver width
 
     def clip(val: object, width: int) -> str:
         s = "" if val is None else str(val)
         return s if len(s) <= width else s[:width]
-
-    header = f"{'Team':<{TW}}  {'Driver':<{DW}}"
-    rule_len = max(len(title), len(header))
-    hr = "-" * rule_len
 
     # Disallow seasons before 2018 (no fallback desired)
     if year < 2018:
@@ -261,6 +256,25 @@ def drivers(ctx: Context) -> str:
     if year < 2018:
         note = "Older data before 2018 is not accurate due to API limitation"
 
+    # Compute dynamic column widths based on data
+    all_teams = teams_sorted
+    all_drivers = [d for t in all_teams for d in grouped.get(t, [])]
+    # Header labels
+    h_team, h_driver = "Team", "Driver"
+    # Determine widths with sensible caps
+    def _compute_width(values: list[str], header: str, *, min_w: int, max_w: int) -> int:
+        base = max(len(header), max((len(str(v)) for v in values), default=0))
+        base = max(min_w, base)
+        base = min(max_w, base)
+        return base
+
+    TW = _compute_width(all_teams, h_team, min_w=10, max_w=28)
+    DW = _compute_width(all_drivers, h_driver, min_w=12, max_w=30)
+
+    header = f"{h_team:<{TW}}  {h_driver:<{DW}}"
+    rule_len = max(len(title), len(header))
+    hr = "-" * rule_len
+
     lines: list[str] = ([note] if note else []) + [title, header, hr]
     for team in teams_sorted:
         drivers_list = grouped[team]
@@ -294,17 +308,7 @@ def results(ctx: Context) -> str:
 
     title = f"F1 {year} Results"
 
-    # Column widths
-    POSW = 3
-    DNAMEW = 22
-    NATW = 4
-    TNAMEW = 22
-    PTSW = 6
-
-    T_POSW = 3
-    T_TEAMW = 26
-    T_PTSW = 6
-
+    # Gutter between the two side-by-side tables
     GUTTER = 4
 
     def clip(val: object, width: int) -> str:
@@ -463,6 +467,29 @@ def results(ctx: Context) -> str:
 
     # Prepare drivers table lines
     left_lines: list[str] = []
+    # Compute dynamic widths for driver table
+    # Gather values for width computation
+    driver_rows_preview = []
+    for abbr, pts in driver_points.items():
+        driver_rows_preview.append({
+            "name": driver_name.get(abbr, abbr),
+            "nat": driver_nat.get(abbr, ""),
+            "team": driver_team.get(abbr, ""),
+            "pts": int(pts) if float(pts).is_integer() else round(pts, 1),
+        })
+
+    def _w(values: list[str], header: str, *, min_w: int, max_w: int) -> int:
+        base = max(len(header), max((len(str(v)) for v in values), default=0))
+        base = max(min_w, base)
+        base = min(max_w, base)
+        return base
+
+    POSW = _w([str(i) for i in range(1, max(1, len(driver_rows_preview)) + 1)], "Pos", min_w=2, max_w=3)
+    DNAMEW = _w([r["name"] for r in driver_rows_preview], "Driver", min_w=12, max_w=26)
+    NATW = _w([r["nat"] for r in driver_rows_preview], "Nat", min_w=3, max_w=4)
+    TNAMEW = _w([r["team"] for r in driver_rows_preview], "Team", min_w=10, max_w=26)
+    PTSW = _w([str(r["pts"]) for r in driver_rows_preview], "Pts", min_w=3, max_w=6)
+
     d_header = f"{'Pos':>{POSW}}  {'Driver':<{DNAMEW}}  {'Nat':<{NATW}}  {'Team':<{TNAMEW}}  {'Pts':>{PTSW}}"
     left_lines.append(d_header)
     left_hr = "-" * len(d_header)
@@ -491,6 +518,12 @@ def results(ctx: Context) -> str:
 
     # Prepare teams table lines
     right_lines: list[str] = []
+    # Compute dynamic widths for constructor table
+    team_rows_preview = [{"team": t, "pts": int(p) if float(p).is_integer() else round(p, 1)} for t, p in team_points.items()]
+    T_POSW = _w([str(i) for i in range(1, max(1, len(team_rows_preview)) + 1)], "Pos", min_w=2, max_w=3)
+    T_TEAMW = _w([r["team"] for r in team_rows_preview], "Team", min_w=10, max_w=28)
+    T_PTSW = _w([str(r["pts"]) for r in team_rows_preview], "Pts", min_w=3, max_w=6)
+
     t_header = f"{'Pos':>{T_POSW}}  {'Team':<{T_TEAMW}}  {'Pts':>{T_PTSW}}"
     right_lines.append(t_header)
     right_hr = "-" * len(t_header)
@@ -639,23 +672,32 @@ def calendar(ctx: Context) -> str:
         except Exception:
             return str(loc) if loc is not None else ""
 
-    # Fixed widths to keep alignment; clip long values
+    # Title and helpers
     title = f"F1 {year} Calendar"
-    CW, LW, RW, SW, SQW, QW = 16, 18, 20, 16, 16, 16
 
     def clip(val: object, width: int) -> str:
         s = "" if val is None else str(val)
-        if len(s) <= width:
-            return s
-        return s[:width]
+        return s if len(s) <= width else s[:width]
 
-    header = (
-        f"{'Rnd':>3}  {'Country':<{CW}}  {'Location':<{LW}}  "
-        f"{'Sprint Qual':<{SQW}}  {'Sprint':<{SW}}  {'Race Qual':<{QW}}  {'Race':<{RW}}"
-    )
-    rule_len = max(len(header), len(title))
-    hr = "-" * rule_len
-    lines = [title, header, hr]
+    # We will build rows first, compute dynamic column widths, then render
+    # Column labels
+    H_COUNTRY = "Country"
+    H_LOCATION = "Location"
+    H_SPRINTQ = "Sprint Qual"
+    H_SPRINT = "Sprint"
+    H_RACEQ = "Race Qual"
+    H_RACE = "Race"
+
+    # Dynamic width clamp helper
+    def clamp_width(values: list[str], header: str, *, min_w: int, max_w: int) -> int:
+        base = max(len(header), max((len(v) for v in values), default=0))
+        if base < min_w:
+            base = min_w
+        if base > max_w:
+            base = max_w
+        return base
+
+    lines = []
 
     cols = set(schedule.columns)
     modern = {"RoundNumber", "Country", "Session5DateUtc"}.issubset(cols)
@@ -718,6 +760,8 @@ def calendar(ctx: Context) -> str:
                     ],
                 )
 
+            # First pass: build raw row values
+            rows_data: list[dict] = []
             for _, row in schedule_sorted.iterrows():
                 rn_val = row.get("RoundNumber", "")
                 try:
@@ -725,32 +769,60 @@ def calendar(ctx: Context) -> str:
                 except Exception:
                     rn = rn_val
 
-                country = clip(row.get("Country", ""), CW)
-                location = clip(str(row.get("Location", "")) or "-", LW)
+                country = str(row.get("Country", ""))
+                location = str(row.get("Location", "") or "-")
                 dt_utc = row.get("Session5DateUtc", None)
-                local_str = clip(format_local(dt_utc), RW)
+                local_str = format_local(dt_utc)
 
                 sprint_str = "-"
                 sprint_q_str = "-"
                 if year >= 2021:
                     s_col = find_sprint_dt(row)
                     if s_col:
-                        sprint_str = clip(format_local(row.get(s_col, None)), SW)
+                        sprint_str = format_local(row.get(s_col, None))
                     sq_col = find_sprint_quali_dt(row)
                     if sq_col:
-                        sprint_q_str = clip(format_local(row.get(sq_col, None)), SQW)
+                        sprint_q_str = format_local(row.get(sq_col, None))
 
                 q_col = find_quali_dt(row)
                 if q_col:
-                    quali_str = clip(format_local(row.get(q_col, None)), QW)
+                    quali_str = format_local(row.get(q_col, None))
                 else:
                     quali_str = "-"
 
+                rows_data.append({
+                    "rnd": rn,
+                    "country": country,
+                    "location": location,
+                    "sq": sprint_q_str,
+                    "s": sprint_str,
+                    "q": quali_str,
+                    "r": local_str,
+                })
+                events_count += 1
+
+            # Compute dynamic widths with sensible caps
+            CW = clamp_width([str(r["country"]) for r in rows_data], H_COUNTRY, min_w=10, max_w=25)
+            LW = clamp_width([str(r["location"]) for r in rows_data], H_LOCATION, min_w=10, max_w=18)
+            SQW = clamp_width([str(r["sq"]) for r in rows_data], H_SPRINTQ, min_w=5, max_w=22)
+            SW = clamp_width([str(r["s"]) for r in rows_data], H_SPRINT, min_w=5, max_w=22)
+            QW = clamp_width([str(r["q"]) for r in rows_data], H_RACEQ, min_w=5, max_w=22)
+            RW = clamp_width([str(r["r"]) for r in rows_data], H_RACE, min_w=5, max_w=22)
+
+            header = (
+                f"{'Rnd':>3}  {H_COUNTRY:<{CW}}  {H_LOCATION:<{LW}}  "
+                f"{H_SPRINTQ:<{SQW}}  {H_SPRINT:<{SW}}  {H_RACEQ:<{QW}}  {H_RACE:<{RW}}"
+            )
+            rule_len = max(len(header), len(title))
+            hr = "-" * rule_len
+            lines = [title, header, hr]
+
+            # Render rows with clipping
+            for r in rows_data:
                 lines.append(
-                    f"{rn:>3}  {country:<{CW}}  {location:<{LW}}  {sprint_q_str:<{SQW}}  {sprint_str:<{SW}}  {quali_str:<{QW}}  {local_str:<{RW}}"
+                    f"{r['rnd']:>3}  {clip(r['country'], CW):<{CW}}  {clip(r['location'], LW):<{LW}}  {clip(r['sq'], SQW):<{SQW}}  {clip(r['s'], SW):<{SW}}  {clip(r['q'], QW):<{QW}}  {clip(r['r'], RW):<{RW}}"
                 )
                 lines.append(hr)
-                events_count += 1
         except Exception as exc:
             return f"Loaded schedule for {year}, but formatting failed: {exc}"
 
@@ -785,6 +857,7 @@ def calendar(ctx: Context) -> str:
             or find_col_contains("qualifying", "date")
         )
 
+        rows_data: list[dict] = []
         for _, row in schedule_sorted.iterrows():
             rn_val = row.get("RoundNumber", "")
             try:
@@ -792,23 +865,51 @@ def calendar(ctx: Context) -> str:
             except Exception:
                 rn = rn_val
 
-            country = clip(row.get("Country", ""), CW)
-            location = clip(str(row.get("Location", "")) or "-", LW)
+            country = str(row.get("Country", ""))
+            location = str(row.get("Location", "") or "-")
 
             race_dt = row.get(race_date_col, None) if race_date_col else None
-            race_str = clip(format_local(race_dt), RW) if race_dt is not None else "-"
+            race_str = format_local(race_dt) if race_dt is not None else "-"
 
             sprint_str = "-"  # not applicable pre-2021
             sprint_q_str = "-"
 
             quali_dt = row.get(quali_date_col, None) if quali_date_col else None
-            quali_str = clip(format_local(quali_dt), QW) if quali_dt is not None else "-"
+            quali_str = format_local(quali_dt) if quali_dt is not None else "-"
 
+            rows_data.append({
+                "rnd": rn,
+                "country": country,
+                "location": location,
+                "sq": sprint_q_str,
+                "s": sprint_str,
+                "q": quali_str,
+                "r": race_str,
+            })
+            events_count += 1
+
+        # Compute dynamic widths with sensible caps
+        CW = clamp_width([str(r["country"]) for r in rows_data], H_COUNTRY, min_w=10, max_w=18)
+        LW = clamp_width([str(r["location"]) for r in rows_data], H_LOCATION, min_w=10, max_w=18)
+        SQW = clamp_width([str(r["sq"]) for r in rows_data], H_SPRINTQ, min_w=5, max_w=22)
+        SW = clamp_width([str(r["s"]) for r in rows_data], H_SPRINT, min_w=5, max_w=22)
+        QW = clamp_width([str(r["q"]) for r in rows_data], H_RACEQ, min_w=5, max_w=22)
+        RW = clamp_width([str(r["r"]) for r in rows_data], H_RACE, min_w=5, max_w=22)
+
+        header = (
+            f"{'Rnd':>3}  {H_COUNTRY:<{CW}}  {H_LOCATION:<{LW}}  "
+            f"{H_SPRINTQ:<{SQW}}  {H_SPRINT:<{SW}}  {H_RACEQ:<{QW}}  {H_RACE:<{RW}}"
+        )
+        rule_len = max(len(header), len(title))
+        hr = "-" * rule_len
+        lines = [title, header, hr]
+
+        # Render rows with clipping
+        for r in rows_data:
             lines.append(
-                f"{rn:>3}  {country:<{CW}}  {location:<{LW}}  {sprint_q_str:<{SQW}}  {sprint_str:<{SW}}  {quali_str:<{QW}}  {race_str:<{RW}}"
+                f"{r['rnd']:>3}  {clip(r['country'], CW):<{CW}}  {clip(r['location'], LW):<{LW}}  {clip(r['sq'], SQW):<{SQW}}  {clip(r['s'], SW):<{SW}}  {clip(r['q'], QW):<{QW}}  {clip(r['r'], RW):<{RW}}"
             )
             lines.append(hr)
-            events_count += 1
     except Exception as exc:
         return f"Loaded schedule for {year}, but formatting failed: {exc}"
 
