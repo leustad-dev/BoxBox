@@ -22,6 +22,42 @@ except Exception:  # pragma: no cover
     pd = None  # type: ignore
 
 
+# Enable FastF1 on-disk cache to speed up repeated session loads (best-effort).
+# Honor FASTF1_CACHE_DIR env var; default to project_root\cache
+try:  # pragma: no cover - environment dependent
+    from fastf1 import Cache as _FF1Cache  # type: ignore
+
+    def _enable_ff1_cache() -> None:
+        cache_dir = os.getenv("FASTF1_CACHE_DIR")
+        if not cache_dir:
+            # Default to project root / cache
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_dir = os.path.join(project_root, "cache")
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            # If creating fails, let FastF1 try anyway
+            pass
+        try:
+            # Guard against double-initialization when possible
+            is_enabled = getattr(_FF1Cache, "is_enabled", None)
+            get_path = getattr(_FF1Cache, "get_cache_path", None)
+            if callable(is_enabled) and callable(get_path):
+                try:
+                    if is_enabled() and str(get_path()) == str(cache_dir):
+                        return
+                except Exception:
+                    pass
+            _FF1Cache.enable_cache(cache_dir)
+        except Exception:
+            # Silently ignore; FastF1 will fall back to its defaults
+            pass
+
+    _enable_ff1_cache()
+except Exception:
+    pass
+
+
 Context = Dict[str, Optional[object]]
 
 
@@ -77,12 +113,16 @@ def live_timing(ctx: Context) -> str:
     return f"Live Timing selected (season={ctx.get('season')}, round={ctx.get('round')}, session={ctx.get('session')})"
 
 
-def drivers(ctx: Context) -> str:
+def drivers(ctx: Context):
     """Show drivers grouped by team for a selected year (2018+ only).
+
+    Returns either a string (error/no-data) or a dict with:
+      { 'lines': list[str], 'selectables': list[dict], 'season': int }
 
     - Uses FastF1 session results (minimal load) to get full driver names and team names.
     - No fallback for <2018 per request; those seasons are not selectable in the UI anymore.
-    - Renders a fixed-width table similar to the Calendar view.
+    - Renders a fixed-width table similar to the Calendar view and includes row metadata
+      so the TUI can enable selection of teams and drivers.
     """
     try:
         year = int(ctx.get("season") or date.today().year)
@@ -99,8 +139,8 @@ def drivers(ctx: Context) -> str:
     if year < 2018:
         return "Driver lineup data is only available from 2018 onwards."
 
-    # Result collector: list of (team, driver)
-    pairs: list[tuple[str, str]] = []
+    # Result collector: list of (team, driver_full_name, driver_abbr)
+    pairs: list[tuple[str, str, str]] = []
 
     # Try FastF1 backend for modern seasons (>=2018)
     try:
@@ -249,15 +289,16 @@ def drivers(ctx: Context) -> str:
                                     abbr = str(r.get("Abbreviation", "")).strip()
                                     team = team_map.get(abbr, "")
                                     if name and team:
-                                        pairs.append((team, name))
+                                        pairs.append((team, name, abbr))
                         except Exception:
                             pass
                     else:
                         for _, r in df.iterrows():
                             name = str(r.get(name_col, "")).strip()
                             team = str(r.get(team_col, "")).strip()
+                            abbr = str(r.get("Abbreviation", "")).strip()
                             if name and team:
-                                pairs.append((team, name))
+                                pairs.append((team, name, abbr))
             except Exception:
                 pass
     except Exception:
@@ -271,14 +312,14 @@ def drivers(ctx: Context) -> str:
     # Group by team name
     from collections import defaultdict
 
-    grouped: dict[str, list[str]] = defaultdict(list)
-    for team, driver in pairs:
-        if driver not in grouped[team]:
-            grouped[team].append(driver)
+    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for team, driver, abbr in pairs:
+        if all(driver != d for d, _ in grouped[team]):
+            grouped[team].append((driver, abbr))
 
     # Sort teams alphabetically, drivers alphabetically within team
     for t in list(grouped.keys()):
-        grouped[t] = sorted(grouped[t], key=lambda s: s.lower())
+        grouped[t] = sorted(grouped[t], key=lambda x: x[0].lower())
 
     teams_sorted = sorted(grouped.keys(), key=lambda s: s.lower())
 
@@ -289,7 +330,7 @@ def drivers(ctx: Context) -> str:
 
     # Compute dynamic column widths based on data
     all_teams = teams_sorted
-    all_drivers = [d for t in all_teams for d in grouped.get(t, [])]
+    all_drivers = [d for t in all_teams for (d, _) in grouped.get(t, [])]
     # Header labels
     h_team, h_driver = "Team", "Driver"
 
@@ -310,17 +351,689 @@ def drivers(ctx: Context) -> str:
     hr = "-" * rule_len
 
     lines: list[str] = ([note] if note else []) + [title, header, hr]
+    selectables: list[dict] = []
+    current_row_index = len(lines)  # first row we will append gets this index
+
     for team in teams_sorted:
         drivers_list = grouped[team]
         if not drivers_list:
             continue
         # First row with team name
-        lines.append(f"{clip(team, TW):<{TW}}  {clip(drivers_list[0], DW):<{DW}}")
-        # Subsequent rows: leave team column blank
-        for d in drivers_list[1:]:
-            lines.append(f"{'':<{TW}}  {clip(d, DW):<{DW}}")
-        lines.append(hr)
+        first_driver, first_abbr = drivers_list[0]
+        lines.append(f"{clip(team, TW):<{TW}}  {clip(first_driver, DW):<{DW}}")
+        # Mark team row selectable as constructor
+        selectables.append({
+            "row": current_row_index,
+            "type": "team",
+            "team": team,
+        })
+        current_row_index += 1
 
+        # Also mark first driver row selectable
+        selectables.append({
+            "row": current_row_index - 1,  # same line has driver too
+            "type": "driver",
+            "team": team,
+            "abbr": first_abbr,
+            "name": first_driver,
+        })
+
+        # Subsequent rows: leave team column blank
+        for d_name, d_abbr in drivers_list[1:]:
+            lines.append(f"{'':<{TW}}  {clip(d_name, DW):<{DW}}")
+            selectables.append({
+                "row": current_row_index,
+                "type": "driver",
+                "team": team,
+                "abbr": d_abbr,
+                "name": d_name,
+            })
+            current_row_index += 1
+
+        lines.append(hr)
+        current_row_index += 1
+
+    # Provide column spec so the TUI can highlight only the selected cell
+    colspec = {
+        "team_x": 0,
+        "team_w": TW,
+        # two spaces between columns in the rendered line
+        "driver_x": TW + 2,
+        "driver_w": DW,
+    }
+
+    return {"lines": lines, "selectables": selectables, "season": year, "colspec": colspec}
+
+
+_SEASON_STATS_CACHE: dict[int, dict] = {}
+
+
+def _aggregate_season_stats(year: int, *, basic_only: bool = True):
+    """Aggregate season-wide stats for drivers and teams (2018+).
+
+    Returns (drivers, teams) where:
+      drivers: dict[abbr] -> {
+        name, nat, dob, number, team,
+        wins, podiums, poles, fastest_laps, pitstops,
+        avg_grid_sum, avg_grid_cnt, avg_finish_sum, avg_finish_cnt,
+        points
+      }
+      teams: dict[team] -> {wins, podiums, poles, fastest_laps, pitstops, avg_finish_sum, avg_finish_cnt}
+    """
+    # Cache hit
+    cached = _SEASON_STATS_CACHE.get(year)
+    if cached and cached.get("basic_ready"):
+        return cached["drivers"], cached["teams"]
+
+    from collections import defaultdict
+
+    drivers: dict[str, dict] = defaultdict(
+        lambda: {
+            "name": "",
+            "nat": "",
+            "dob": None,
+            "number": "",
+            "team": "",
+            "wins": 0,
+            "podiums": 0,
+            "poles": 0,
+            "fastest_laps": 0,
+            "pitstops": 0,
+            "avg_grid_sum": 0.0,
+            "avg_grid_cnt": 0,
+            "avg_finish_sum": 0.0,
+            "avg_finish_cnt": 0,
+            "points": 0.0,
+        }
+    )
+    teams: dict[str, dict] = defaultdict(
+        lambda: {
+            "poles": 0,
+            "wins": 0,
+            "podiums": 0,
+            "fastest_laps": 0,
+            "pitstops": 0,
+            "avg_finish_sum": 0.0,
+            "avg_finish_cnt": 0,
+        }
+    )
+
+    try:
+        schedule = fastf1.get_event_schedule(year, include_testing=False)
+    except Exception as exc:
+        _log(f"[stats] ERROR loading schedule {year}: {exc}")
+        return drivers, teams
+
+    cols = list(getattr(schedule, "columns", []))
+    now_utc = datetime.now(timezone.utc)
+
+    def _session_dt_utc(row, code: str):
+        name_cols = [
+            c
+            for c in cols
+            if c.startswith("Session")
+            and c[-1:].isdigit()
+            and not c.endswith("Utc")
+            and not c.endswith("DateUtc")
+        ]
+        for nc in name_cols:
+            idx = nc[len("Session") :]
+            dcol = f"Session{idx}DateUtc"
+            name = str(row.get(nc, "") or "").strip().lower()
+            if code == "R" and (name == "race" or "grand prix" in name or "grandprix" in name):
+                return row.get(dcol)
+            if code == "Q" and name == "qualifying":
+                return row.get(dcol)
+            if code == "S" and (name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name)):
+                return row.get(dcol)
+        return None
+
+    for _, row in schedule.iterrows():
+        rnd_val = row.get("RoundNumber", None)
+        try:
+            rnd = int(rnd_val)
+        except Exception:
+            continue
+
+        # Qualifying for poles
+        qts = _session_dt_utc(row, "Q")
+        try:
+            if pd is not None and isinstance(qts, pd.Timestamp):
+                if qts.tzinfo is None:
+                    qts = qts.tz_localize("UTC")
+                qts = qts.tz_convert("UTC").to_pydatetime()
+        except Exception:
+            pass
+        if isinstance(qts, datetime) and qts <= now_utc:
+            try:
+                q = fastf1.get_session(year, rnd, "Q")
+                q.load(telemetry=False, laps=False, weather=False, messages=False)
+                dfq = getattr(q, "results", None)
+                if dfq is not None and not getattr(dfq, "empty", False):
+                    pole = dfq.nsmallest(1, "Position").iloc[0]
+                    ab = str(pole.get("Abbreviation", "") or "").strip()
+                    tm = str(pole.get("TeamName", pole.get("Team", "")) or "")
+                    if ab:
+                        drivers[ab]["poles"] += 1
+                    if tm:
+                        teams[tm]["poles"] += 1
+            except Exception as exc:
+                _log(f"[stats] WARN: qual rnd={rnd} failed: {exc}")
+
+        # Race + maybe sprint
+        to_consider = ["R"]
+        fmt = str(row.get("EventFormat", "") or "").lower()
+        if "sprint" in fmt:
+            to_consider.append("S")
+
+        for code in to_consider:
+            ts = _session_dt_utc(row, code)
+            try:
+                if pd is not None and isinstance(ts, pd.Timestamp):
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize("UTC")
+                    ts = ts.tz_convert("UTC").to_pydatetime()
+            except Exception:
+                pass
+            if not (isinstance(ts, datetime) and ts <= now_utc):
+                continue
+
+            try:
+                s = fastf1.get_session(year, rnd, code)
+                # For basic aggregation keep it light: no laps
+                s.load(telemetry=False, laps=not basic_only, weather=False, messages=False)
+                dfr = getattr(s, "results", None)
+                if dfr is None or getattr(dfr, "empty", False):
+                    continue
+                fl_abbr = ""
+                if not basic_only:
+                        # Only compute fastest laps in heavy mode
+                        try:
+                            fl = s.laps.pick_fastest()
+                            fl_abbr = str(fl.get("Driver", "") or "").strip()
+                        except Exception:
+                            fl_abbr = ""
+
+                for _, r in dfr.iterrows():
+                    abbr = str(r.get("Abbreviation", "") or "").strip()
+                    name = r.get("FullName") or r.get("DriverName") or abbr
+                    team = r.get("TeamName") or r.get("Team") or ""
+                    nat = r.get("Nationality") or ""
+                    num = r.get("DriverNumber") or ""
+                    pos = r.get("Position")
+                    grid = r.get("GridPosition")
+                    pts = r.get("Points", 0) or 0
+                    try:
+                        pts = float(pts)
+                    except Exception:
+                        try:
+                            pts = float(str(pts).strip())
+                        except Exception:
+                            pts = 0.0
+
+                    d = drivers[abbr]
+                    if name:
+                        d["name"] = name
+                    if team:
+                        d["team"] = team
+                    if nat:
+                        d["nat"] = d["nat"] or nat
+                    if num and not d["number"]:
+                        d["number"] = str(num)
+                    # date of birth
+                    # enrich from driver metadata
+                    try:
+                        meta = s.get_driver(abbr) or {}
+                        # nationality fallbacks
+                        if not nat:
+                            nat = (
+                                meta.get("Nationality")
+                                or meta.get("CountryCode")
+                                or meta.get("Country")
+                                or ""
+                            )
+                        if not d["nat"] and nat:
+                            d["nat"] = nat
+                        # date of birth
+                        if not d["dob"]:
+                            d["dob"] = (
+                                meta.get("DateOfBirth")
+                                or meta.get("DOB")
+                                or meta.get("BirthDate")
+                            )
+                    except Exception:
+                        pass
+
+                    try:
+                        ipos = int(pos)
+                        if ipos == 1:
+                            d["wins"] += 1
+                        if ipos <= 3:
+                            d["podiums"] += 1
+                        d["avg_finish_sum"] += ipos
+                        d["avg_finish_cnt"] += 1
+                    except Exception:
+                        pass
+
+                    try:
+                        igrid = int(grid)
+                        if igrid > 0:
+                            d["avg_grid_sum"] += igrid
+                            d["avg_grid_cnt"] += 1
+                    except Exception:
+                        pass
+
+                    # accumulate season points
+                    d["points"] += pts
+
+                    # pit stops only in heavy mode to avoid loading laps by default
+                    if not basic_only:
+                        try:
+                            dlaps = s.laps.pick_drivers(abbr)
+                            d["pitstops"] += int(dlaps["PitInTime"].notna().sum())
+                        except Exception:
+                            pass
+
+                    if team:
+                        if code == "R" and isinstance(pos, (int, float)):
+                            teams[team]["avg_finish_sum"] += int(pos)
+                            teams[team]["avg_finish_cnt"] += 1
+                        if code == "R" and not basic_only:
+                            try:
+                                teams[team]["pitstops"] += int(dlaps["PitInTime"].notna().sum())
+                            except Exception:
+                                pass
+
+                if fl_abbr:
+                    drivers[fl_abbr]["fastest_laps"] += 1
+                    # count for team of fl driver
+                    try:
+                        tname = drivers[fl_abbr]["team"]
+                        if tname:
+                            teams[tname]["fastest_laps"] += 1
+                    except Exception:
+                        pass
+            except Exception as exc:
+                _log(f"[stats] WARN: load rnd={rnd} code={code} failed: {exc}")
+
+    # Save in cache
+    _SEASON_STATS_CACHE[year] = {
+        "drivers": drivers,
+        "teams": teams,
+        "basic_ready": True,
+        "enriched": set(),  # type: ignore
+        # session_summaries: (round, code) -> { 'pitstops': {abbr: int}, 'fastest': abbr }
+        "session_summaries": {},
+        "processed_sessions": set(),
+    }
+    return drivers, teams
+
+
+def _ensure_session_summary(year: int, rnd: int, code: str) -> Optional[dict]:
+    """Load a session once and compute summary:
+    returns { 'pitstops': {abbr: int}, 'fastest': abbr_or_'' }
+    Caches the result in _SEASON_STATS_CACHE[year]['session_summaries'].
+    """
+    cache = _SEASON_STATS_CACHE.get(year)
+    if not cache:
+        _aggregate_season_stats(year, basic_only=True)
+        cache = _SEASON_STATS_CACHE.get(year)
+    if not cache:
+        return None
+    summaries: dict = cache.setdefault("session_summaries", {})
+    key = (int(rnd), str(code))
+    if key in summaries:
+        return summaries[key]
+    try:
+        s = fastf1.get_session(year, rnd, code)
+        s.load(telemetry=False, laps=True, weather=False, messages=False)
+        laps = getattr(s, "laps", None)
+        if laps is None or laps.empty:
+            res = {"pitstops": {}, "fastest": ""}
+            summaries[key] = res
+            cache["session_summaries"] = summaries
+            return res
+        # Pitstops per driver: count laps with PitInTime present
+        try:
+            pit_series = laps["PitInTime"].notna()
+            pit_counts = laps.loc[pit_series, ["Driver", "PitInTime"]].groupby("Driver").size()
+            pit_map = {str(k): int(v) for k, v in pit_counts.to_dict().items()}
+        except Exception:
+            pit_map = {}
+        # Fastest lap owner
+        fastest = ""
+        try:
+            fl = laps.pick_fastest()
+            fastest = str(fl.get("Driver", "") or "").strip()
+        except Exception:
+            fastest = ""
+        res = {"pitstops": pit_map, "fastest": fastest}
+        summaries[key] = res
+        cache["session_summaries"] = summaries
+        # mark processed
+        processed: set = cache.setdefault("processed_sessions", set())  # type: ignore
+        processed.add(key)
+        cache["processed_sessions"] = processed
+        return res
+    except Exception as exc:
+        _log(f"[summary] WARN: load summary rnd={rnd} code={code} failed: {exc}")
+        return None
+
+
+def _enrich_driver(year: int, abbr: str) -> None:
+    """Lazily enrich a single driver's stats using precomputed session summaries.
+
+    Does not iterate all sessions if summaries are not available; only sums what we have.
+    """
+    cache = _SEASON_STATS_CACHE.get(year)
+    if not cache:
+        _aggregate_season_stats(year, basic_only=True)
+        cache = _SEASON_STATS_CACHE.get(year) or {}
+    drivers = cache.get("drivers", {})
+    enriched: set = cache.get("enriched", set())  # type: ignore
+    if abbr in enriched:
+        return
+    summaries: dict = cache.get("session_summaries", {})
+    # Sum existing summaries
+    pitstops = 0
+    fastest_laps = 0
+    for (_rnd, _code), data in list(summaries.items()):
+        try:
+            pitstops += int(data.get("pitstops", {}).get(abbr, 0))
+        except Exception:
+            pass
+        try:
+            if str(data.get("fastest", "")) == abbr:
+                fastest_laps += 1
+        except Exception:
+            pass
+    # Write back what we have without blocking
+    d = drivers.get(abbr)
+    if d is not None:
+        if pitstops:
+            d["pitstops"] = pitstops
+        if fastest_laps:
+            d["fastest_laps"] = fastest_laps
+    enriched.add(abbr)
+    cache["enriched"] = enriched
+
+
+def prewarm_driver_enrichment(year: int, abbrs: list[str]) -> None:
+    """Precompute summaries for a limited set of recently completed sessions to
+    reduce first-popup latency. Processes only Race sessions for the last N rounds
+    (default N=5) and updates cached driver pitstops/fastest-lap counts.
+
+    Idempotent across calls; also safe to run multiple times.
+    """
+    if year < 2018:
+        return
+    # Ensure basic cache
+    _aggregate_season_stats(year, basic_only=True)
+    cache = _SEASON_STATS_CACHE.get(year)
+    if not cache:
+        return
+    drivers = cache.get("drivers", {})
+    enriched: set = cache.get("enriched", set())  # type: ignore
+    processed = cache.get("processed_sessions", set())  # type: ignore
+    if not isinstance(processed, set):
+        processed = set()
+
+    target_abbrs = {a for a in abbrs if isinstance(a, str) and a}
+    if not target_abbrs:
+        cache["processed_sessions"] = processed
+        return
+
+    try:
+        schedule = fastf1.get_event_schedule(year, include_testing=False)
+    except Exception as exc:
+        _log(f"[prewarm] WARN: schedule {year} failed: {exc}")
+        return
+
+    cols = list(getattr(schedule, "columns", []))
+    now_utc = datetime.now(timezone.utc)
+
+    def _session_dt_utc(row, code: str):
+        name_cols = [
+            c
+            for c in cols
+            if c.startswith("Session")
+            and c[-1:].isdigit()
+            and not c.endswith("Utc")
+            and not c.endswith("DateUtc")
+        ]
+        for nc in name_cols:
+            idx = nc[len("Session") :]
+            dcol = f"Session{idx}DateUtc"
+            name = str(row.get(nc, "") or "").strip().lower()
+            if code == "R" and (name == "race" or "grand prix" in name or "grandprix" in name):
+                return row.get(dcol)
+            if code == "S" and (name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name)):
+                return row.get(dcol)
+        return None
+
+    # Collect completed race sessions only
+    completed_races: list[tuple[int, str, datetime]] = []
+    for _, row in schedule.iterrows():
+        rnd_val = row.get("RoundNumber", None)
+        try:
+            rnd = int(rnd_val)
+        except Exception:
+            continue
+        ts = _session_dt_utc(row, "R")
+        try:
+            if pd is not None and isinstance(ts, pd.Timestamp):
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                ts = ts.tz_convert("UTC").to_pydatetime()
+        except Exception:
+            pass
+        if isinstance(ts, datetime) and ts <= now_utc:
+            completed_races.append((rnd, "R", ts))
+
+    # Limit to last N races
+    completed_races.sort(key=lambda x: x[2])
+    LAST_N = 5
+    subset = completed_races[-LAST_N:]
+
+    # Process with bounded parallelism
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+    except Exception:
+        ThreadPoolExecutor = None  # type: ignore
+    tasks = []
+    if ThreadPoolExecutor is not None:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            for rnd, code, _ in subset:
+                key = (rnd, code)
+                if key in processed:
+                    continue
+                tasks.append(ex.submit(_ensure_session_summary, year, rnd, code))
+            for fut in tasks:
+                try:
+                    fut.result(timeout=None)
+                except Exception as exc:
+                    _log(f"[prewarm] WARN: summary task failed: {exc}")
+    else:
+        for rnd, code, _ in subset:
+            key = (rnd, code)
+            if key in processed:
+                continue
+            _ensure_session_summary(year, rnd, code)
+
+    # Apply summaries to target drivers
+    summaries: dict = cache.get("session_summaries", {})
+    for (rnd, code) in [(r, c) for (r, c, _) in subset]:
+        data = summaries.get((rnd, code), {})
+        pit_map = data.get("pitstops", {}) or {}
+        fl = str(data.get("fastest", "") or "")
+        for ab in list(target_abbrs):
+            try:
+                drivers[ab]["pitstops"] += int(pit_map.get(ab, 0))
+            except Exception:
+                pass
+        if fl:
+            try:
+                drivers[fl]["fastest_laps"] += 1
+            except Exception:
+                pass
+        processed.add((rnd, code))
+
+    cache["processed_sessions"] = processed
+    # Do not force-set enriched; allow detailed enrichment to be completed in background
+
+
+def driver_stats(ctx: Context, year: int, abbr: str) -> str:
+    """Build a stats summary for a driver in a given season (2018+)."""
+    if year < 2018:
+        return "Driver statistics are only available from 2018 onwards."
+    drivers, _ = _aggregate_season_stats(year, basic_only=True)
+    s = drivers.get(abbr)
+    if not s:
+        return f"No data for driver {abbr} in {year}."
+
+    avg_grid = (
+        round(s["avg_grid_sum"] / s["avg_grid_cnt"], 1) if s["avg_grid_cnt"] else ""
+    )
+    avg_finish = (
+        round(s["avg_finish_sum"] / s["avg_finish_cnt"], 1)
+        if s["avg_finish_cnt"]
+        else ""
+    )
+
+    # Prefer non-blocking enrichment: sum from session_summaries if available
+    cache = _SEASON_STATS_CACHE.get(year, {})
+    summaries: dict = cache.get("session_summaries", {})
+    pit_extra = 0
+    fl_extra = 0
+    for (_k, data) in summaries.items():
+        try:
+            pit_extra += int(data.get("pitstops", {}).get(abbr, 0))
+        except Exception:
+            pass
+        try:
+            if str(data.get("fastest", "")) == abbr:
+                fl_extra += 1
+        except Exception:
+            pass
+    # Merge extras without blocking
+    total_pits = int(s.get("pitstops") or 0)
+    total_pits = max(total_pits, pit_extra)
+    total_fl = int(s.get("fastest_laps") or 0)
+    total_fl = max(total_fl, fl_extra)
+
+    lines = [
+        f"Driver Statistics — {year}",
+        "-" * 40,
+        f"Name: {s['name']} ({abbr})",
+        f"Team: {s['team']}",
+        f"Driver No: {s['number']}",
+        "",
+        f"Total Points: {int(s['points']) if float(s['points']).is_integer() else round(float(s['points']), 1)}",
+        f"Poles: {s['poles']}",
+        f"Wins: {s['wins']}",
+        f"Podiums: {s['podiums']}",
+        f"Fastest Laps: {total_fl}",
+        f"Pit Stops: {total_pits}",
+        f"Avg Grid: {avg_grid}",
+        f"Avg Finish: {avg_finish}",
+    ]
+    return "\n".join(lines)
+
+
+def complete_season_summaries(year: int) -> None:
+    """Background task: fill session summaries for all completed Race and Sprint
+    sessions in the season. Safe to call repeatedly.
+    """
+    if year < 2018:
+        return
+    _aggregate_season_stats(year, basic_only=True)
+    cache = _SEASON_STATS_CACHE.get(year)
+    if not cache:
+        return
+    try:
+        schedule = fastf1.get_event_schedule(year, include_testing=False)
+    except Exception as exc:
+        _log(f"[complete] WARN: schedule {year} failed: {exc}")
+        return
+    cols = list(getattr(schedule, "columns", []))
+    now_utc = datetime.now(timezone.utc)
+
+    def _session_dt_utc(row, code: str):
+        name_cols = [
+            c
+            for c in cols
+            if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")
+        ]
+        for nc in name_cols:
+            idx = nc[len("Session") :]
+            dcol = f"Session{idx}DateUtc"
+            name = str(row.get(nc, "") or "").strip().lower()
+            if code == "R" and (name == "race" or "grand prix" in name or "grandprix" in name):
+                return row.get(dcol)
+            if code == "S" and (name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name)):
+                return row.get(dcol)
+        return None
+
+    to_process: list[tuple[int, str]] = []
+    for _, row in schedule.iterrows():
+        rnd_val = row.get("RoundNumber", None)
+        try:
+            rnd = int(rnd_val)
+        except Exception:
+            continue
+        for code in ("R", "S"):
+            ts = _session_dt_utc(row, code)
+            try:
+                if pd is not None and isinstance(ts, pd.Timestamp):
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize("UTC")
+                    ts = ts.tz_convert("UTC").to_pydatetime()
+            except Exception:
+                pass
+            if isinstance(ts, datetime) and ts <= now_utc:
+                to_process.append((rnd, code))
+    # Deduplicate and skip processed
+    processed: set = cache.get("processed_sessions", set())  # type: ignore
+    if not isinstance(processed, set):
+        processed = set()
+    to_process = [(r, c) for (r, c) in to_process if (r, c) not in processed]
+    if not to_process:
+        return
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+    except Exception:
+        ThreadPoolExecutor = None  # type: ignore
+    if ThreadPoolExecutor is not None:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = [ex.submit(_ensure_session_summary, year, r, c) for (r, c) in to_process]
+            for f in futs:
+                try:
+                    f.result(timeout=None)
+                except Exception as exc:
+                    _log(f"[complete] WARN: summary task failed: {exc}")
+    else:
+        for (r, c) in to_process:
+            _ensure_session_summary(year, r, c)
+
+
+def constructor_stats(ctx: Context, year: int, team_name: str) -> str:
+    """Build a stats summary for a constructor in a given season (2018+)."""
+    if year < 2018:
+        return "Constructor statistics are only available from 2018 onwards."
+    _, teams = _aggregate_season_stats(year)
+    s = teams.get(team_name)
+    if not s:
+        return f"No data for constructor {team_name} in {year}."
+
+    lines = [
+        f"Constructor Statistics — {year}",
+        "-" * 40,
+        f"Team: {team_name}",
+        "",
+        f"Poles: {s['poles']}",
+        f"Fastest Laps: {s['fastest_laps']}",
+        f"Pit Stops: {s['pitstops']}",
+    ]
     return "\n".join(lines)
 
 
