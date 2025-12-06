@@ -4,6 +4,7 @@ Each handler receives a context dict (may include season, round, session)
 and returns a short status string to display in the TUI. Some handlers are
 still stubs; calendar renders a formatted table.
 """
+
 from __future__ import annotations
 
 from typing import Dict, Optional
@@ -13,6 +14,12 @@ import fastf1
 import os
 import io
 from datetime import datetime as _dt
+
+# Non-problematic third-party dependency imported at module level
+try:
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    pd = None  # type: ignore
 
 
 Context = Dict[str, Optional[object]]
@@ -104,55 +111,63 @@ def drivers(ctx: Context) -> str:
             except Exception:
                 return None
 
-            try:
-                import pandas as _pd  # type: ignore
-            except Exception:  # pragma: no cover
-                _pd = None  # type: ignore
-
             # Collect all sessions with their UTC timestamps
             candidates: list[tuple[datetime, int, str]] = []  # (dt_utc, round, code)
 
             # Identify name and date columns
-            cols = list(getattr(schedule, 'columns', []))
-            name_cols = [c for c in cols if c.startswith('Session') and c[-1:].isdigit() and not c.endswith('Utc') and not c.endswith('DateUtc')]
+            cols = list(getattr(schedule, "columns", []))
+            name_cols = [
+                c
+                for c in cols
+                if c.startswith("Session")
+                and c[-1:].isdigit()
+                and not c.endswith("Utc")
+                and not c.endswith("DateUtc")
+            ]
 
             def _map_name_to_code(name: str) -> Optional[str]:
                 n = name.strip().lower()
                 if not n:
                     return None
                 # Prefer specific competitive sessions
-                if 'sprint shootout' in n or n == 'sprint shootout' or 'sprint qualifying' in n:
-                    return 'SQ'
-                if n == 'sprint' or (('sprint' in n) and ('qual' not in n) and ('shootout' not in n)):
-                    return 'S'
-                if n == 'qualifying' or (('qualifying' in n) and ('sprint' not in n)):
-                    return 'Q'
-                if n == 'race' or 'grand prix' in n or 'grandprix' in n:
-                    return 'R'
-                if 'practice 3' in n or 'fp3' in n:
-                    return 'FP3'
-                if 'practice 2' in n or 'fp2' in n:
-                    return 'FP2'
-                if 'practice 1' in n or 'fp1' in n:
-                    return 'FP1'
+                if (
+                    "sprint shootout" in n
+                    or n == "sprint shootout"
+                    or "sprint qualifying" in n
+                ):
+                    return "SQ"
+                if n == "sprint" or (
+                    ("sprint" in n) and ("qual" not in n) and ("shootout" not in n)
+                ):
+                    return "S"
+                if n == "qualifying" or (("qualifying" in n) and ("sprint" not in n)):
+                    return "Q"
+                if n == "race" or "grand prix" in n or "grandprix" in n:
+                    return "R"
+                if "practice 3" in n or "fp3" in n:
+                    return "FP3"
+                if "practice 2" in n or "fp2" in n:
+                    return "FP2"
+                if "practice 1" in n or "fp1" in n:
+                    return "FP1"
                 return None
 
             # Build candidates list
             for _, row in schedule.iterrows():
                 # Round number can be int or str
-                rnd_val = row.get('RoundNumber', None)
+                rnd_val = row.get("RoundNumber", None)
                 try:
                     rnd = int(rnd_val)
                 except Exception:
                     # if not convertible, skip (we need numeric round to query)
                     continue
                 for nc in name_cols:
-                    name_val = str(row.get(nc, '') or '')
+                    name_val = str(row.get(nc, "") or "")
                     code = _map_name_to_code(name_val)
                     if not code:
                         continue
-                    idx = nc[len('Session'):]
-                    dcol = f'Session{idx}DateUtc'
+                    idx = nc[len("Session") :]
+                    dcol = f"Session{idx}DateUtc"
                     if dcol not in cols:
                         continue
                     dt_val = row.get(dcol, None)
@@ -160,12 +175,16 @@ def drivers(ctx: Context) -> str:
                         continue
                     dt_utc: Optional[datetime]
                     try:
-                        if _pd is not None and isinstance(dt_val, _pd.Timestamp):
+                        if pd is not None and isinstance(dt_val, pd.Timestamp):
                             if dt_val.tzinfo is None:
-                                dt_val = dt_val.tz_localize('UTC')
-                            dt_utc = dt_val.tz_convert('UTC').to_pydatetime()
+                                dt_val = dt_val.tz_localize("UTC")
+                            dt_utc = dt_val.tz_convert("UTC").to_pydatetime()
                         elif isinstance(dt_val, datetime):
-                            dt_utc = dt_val if dt_val.tzinfo else dt_val.replace(tzinfo=timezone.utc)
+                            dt_utc = (
+                                dt_val
+                                if dt_val.tzinfo
+                                else dt_val.replace(tzinfo=timezone.utc)
+                            )
                         else:
                             continue
                     except Exception:
@@ -182,7 +201,7 @@ def drivers(ctx: Context) -> str:
                 return None
 
             # Sort by time descending, but enforce session code priority for same timestamp
-            priority = {'R': 6, 'Q': 5, 'S': 4, 'SQ': 3, 'FP3': 2, 'FP2': 1, 'FP1': 0}
+            priority = {"R": 6, "Q": 5, "S": 4, "SQ": 3, "FP3": 2, "FP2": 1, "FP1": 0}
             candidates.sort(key=lambda x: (x[0], priority.get(x[2], -1)), reverse=True)
             # Take the top candidate
             _, rnd_best, code_best = candidates[0]
@@ -197,13 +216,21 @@ def drivers(ctx: Context) -> str:
                 sess.load(telemetry=False, laps=False, weather=False)
                 df = getattr(sess, "results", None)
                 if df is not None and not getattr(df, "empty", False):
-                    name_col = "FullName" if "FullName" in df.columns else (
-                        "DriverName" if "DriverName" in df.columns else (
-                            "Driver" if "Driver" in df.columns else "Abbreviation"
+                    name_col = (
+                        "FullName"
+                        if "FullName" in df.columns
+                        else (
+                            "DriverName"
+                            if "DriverName" in df.columns
+                            else (
+                                "Driver" if "Driver" in df.columns else "Abbreviation"
+                            )
                         )
                     )
-                    team_col = "TeamName" if "TeamName" in df.columns else (
-                        "Team" if "Team" in df.columns else None
+                    team_col = (
+                        "TeamName"
+                        if "TeamName" in df.columns
+                        else ("Team" if "Team" in df.columns else None)
                     )
                     if team_col is None:
                         # Try loading light laps to map teams
@@ -212,7 +239,11 @@ def drivers(ctx: Context) -> str:
                             laps = getattr(sess, "laps", None)
                             if laps is not None and not laps.empty:
                                 latest_laps = laps.groupby("Driver").last()
-                                team_map = latest_laps["Team"].to_dict() if "Team" in latest_laps.columns else {}
+                                team_map = (
+                                    latest_laps["Team"].to_dict()
+                                    if "Team" in latest_laps.columns
+                                    else {}
+                                )
                                 for _, r in df.iterrows():
                                     name = str(r.get(name_col, "")).strip()
                                     abbr = str(r.get("Abbreviation", "")).strip()
@@ -261,8 +292,11 @@ def drivers(ctx: Context) -> str:
     all_drivers = [d for t in all_teams for d in grouped.get(t, [])]
     # Header labels
     h_team, h_driver = "Team", "Driver"
+
     # Determine widths with sensible caps
-    def _compute_width(values: list[str], header: str, *, min_w: int, max_w: int) -> int:
+    def _compute_width(
+        values: list[str], header: str, *, min_w: int, max_w: int
+    ) -> int:
         base = max(len(header), max((len(str(v)) for v in values), default=0))
         base = max(min_w, base)
         base = min(max_w, base)
@@ -349,22 +383,41 @@ def results(ctx: Context) -> str:
             return True
         # else scan session names
         for c in cols:
-            if c.startswith("Session") and not c.endswith("Utc") and not c.endswith("DateUtc") and c[-1:].isdigit():
+            if (
+                c.startswith("Session")
+                and not c.endswith("Utc")
+                and not c.endswith("DateUtc")
+                and c[-1:].isdigit()
+            ):
                 name = str(row.get(c, "") or "").lower()
-                if name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name):
+                if name == "sprint" or (
+                    "sprint" in name and "qual" not in name and "shootout" not in name
+                ):
                     return True
         return False
 
     def _session_dt_utc(row, code: str):
         # Try to find a matching datetime for code to filter future sessions
-        name_cols = [c for c in cols if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")]
+        name_cols = [
+            c
+            for c in cols
+            if c.startswith("Session")
+            and c[-1:].isdigit()
+            and not c.endswith("Utc")
+            and not c.endswith("DateUtc")
+        ]
         for nc in name_cols:
-            idx = nc[len("Session"):]
+            idx = nc[len("Session") :]
             dcol = f"Session{idx}DateUtc"
             name = str(row.get(nc, "") or "").strip().lower()
-            if code == "R" and (name == "race" or "grand prix" in name or "grandprix" in name):
+            if code == "R" and (
+                name == "race" or "grand prix" in name or "grandprix" in name
+            ):
                 return row.get(dcol)
-            if code == "S" and (name == "sprint" or ("sprint" in name and "qual" not in name and "shootout" not in name)):
+            if code == "S" and (
+                name == "sprint"
+                or ("sprint" in name and "qual" not in name and "shootout" not in name)
+            ):
                 return row.get(dcol)
         return None
 
@@ -390,6 +443,7 @@ def results(ctx: Context) -> str:
             try:
                 # Normalize pandas.Timestamp and naive datetimes
                 import pandas as _pd  # type: ignore
+
                 if isinstance(ts, _pd.Timestamp):
                     if ts.tzinfo is None:
                         ts = ts.tz_localize("UTC")
@@ -415,14 +469,29 @@ def results(ctx: Context) -> str:
                 # Determine useful columns
                 cols_r = set(df.columns)
                 name_col = (
-                    "FullName" if "FullName" in cols_r else
-                    ("DriverName" if "DriverName" in cols_r else ("Driver" if "Driver" in cols_r else "Abbreviation"))
+                    "FullName"
+                    if "FullName" in cols_r
+                    else (
+                        "DriverName"
+                        if "DriverName" in cols_r
+                        else ("Driver" if "Driver" in cols_r else "Abbreviation")
+                    )
                 )
-                team_col = "TeamName" if "TeamName" in cols_r else ("Team" if "Team" in cols_r else None)
-                pts_col = "Points" if "Points" in cols_r else ("points" if "points" in cols_r else None)
+                team_col = (
+                    "TeamName"
+                    if "TeamName" in cols_r
+                    else ("Team" if "Team" in cols_r else None)
+                )
+                pts_col = (
+                    "Points"
+                    if "Points" in cols_r
+                    else ("points" if "points" in cols_r else None)
+                )
 
                 if pts_col is None:
-                    _log(f"[results] no Points column for rnd={rnd} code={code}; columns={list(df.columns)}")
+                    _log(
+                        f"[results] no Points column for rnd={rnd} code={code}; columns={list(df.columns)}"
+                    )
                     continue
 
                 for _, r in df.iterrows():
@@ -443,7 +512,11 @@ def results(ctx: Context) -> str:
                     if not nat and hasattr(sess, "get_driver") and abbr:
                         try:
                             dmeta = sess.get_driver(abbr) or {}
-                            nat = dmeta.get("CountryCode") or dmeta.get("Nationality") or ""
+                            nat = (
+                                dmeta.get("CountryCode")
+                                or dmeta.get("Nationality")
+                                or ""
+                            )
                         except Exception:
                             nat = ""
 
@@ -471,12 +544,14 @@ def results(ctx: Context) -> str:
     # Gather values for width computation
     driver_rows_preview = []
     for abbr, pts in driver_points.items():
-        driver_rows_preview.append({
-            "name": driver_name.get(abbr, abbr),
-            "nat": driver_nat.get(abbr, ""),
-            "team": driver_team.get(abbr, ""),
-            "pts": int(pts) if float(pts).is_integer() else round(pts, 1),
-        })
+        driver_rows_preview.append(
+            {
+                "name": driver_name.get(abbr, abbr),
+                "nat": driver_nat.get(abbr, ""),
+                "team": driver_team.get(abbr, ""),
+                "pts": int(pts) if float(pts).is_integer() else round(pts, 1),
+            }
+        )
 
     def _w(values: list[str], header: str, *, min_w: int, max_w: int) -> int:
         base = max(len(header), max((len(str(v)) for v in values), default=0))
@@ -484,7 +559,12 @@ def results(ctx: Context) -> str:
         base = min(max_w, base)
         return base
 
-    POSW = _w([str(i) for i in range(1, max(1, len(driver_rows_preview)) + 1)], "Pos", min_w=2, max_w=3)
+    POSW = _w(
+        [str(i) for i in range(1, max(1, len(driver_rows_preview)) + 1)],
+        "Pos",
+        min_w=2,
+        max_w=3,
+    )
     DNAMEW = _w([r["name"] for r in driver_rows_preview], "Driver", min_w=12, max_w=26)
     NATW = _w([r["nat"] for r in driver_rows_preview], "Nat", min_w=3, max_w=4)
     TNAMEW = _w([r["team"] for r in driver_rows_preview], "Team", min_w=10, max_w=26)
@@ -519,8 +599,16 @@ def results(ctx: Context) -> str:
     # Prepare teams table lines
     right_lines: list[str] = []
     # Compute dynamic widths for constructor table
-    team_rows_preview = [{"team": t, "pts": int(p) if float(p).is_integer() else round(p, 1)} for t, p in team_points.items()]
-    T_POSW = _w([str(i) for i in range(1, max(1, len(team_rows_preview)) + 1)], "Pos", min_w=2, max_w=3)
+    team_rows_preview = [
+        {"team": t, "pts": int(p) if float(p).is_integer() else round(p, 1)}
+        for t, p in team_points.items()
+    ]
+    T_POSW = _w(
+        [str(i) for i in range(1, max(1, len(team_rows_preview)) + 1)],
+        "Pos",
+        min_w=2,
+        max_w=3,
+    )
     T_TEAMW = _w([r["team"] for r in team_rows_preview], "Team", min_w=10, max_w=28)
     T_PTSW = _w([str(r["pts"]) for r in team_rows_preview], "Pts", min_w=3, max_w=6)
 
@@ -562,6 +650,7 @@ def results(ctx: Context) -> str:
 
     max_rows = max(len(left_lines), len(right_lines))
     from itertools import zip_longest
+
     for l, r in zip_longest(left_lines, right_lines, fillvalue=""):
         lines.append(f"{pad_line(l, left_width)}{gutter}{pad_line(r, right_width)}")
 
@@ -619,11 +708,7 @@ def calendar(ctx: Context) -> str:
         # safeguards will still catch the empty case by counting rendered rows.
         pass
 
-    # Optional pandas (comes with fastf1)
-    try:
-        import pandas as pd  # type: ignore
-    except Exception:  # pragma: no cover
-        pd = None  # type: ignore
+    # pandas is optionally available via module-level import as `pd`
 
     def to_local(ts):
         try:
@@ -645,7 +730,11 @@ def calendar(ctx: Context) -> str:
             name = (tz_name or "").strip()
             if name:
                 if " " in name:
-                    parts = [p for p in name.replace("(", " ").replace(")", " ").split() if p.isalpha()]
+                    parts = [
+                        p
+                        for p in name.replace("(", " ").replace(")", " ").split()
+                        if p.isalpha()
+                    ]
                     if parts:
                         return "".join(p[0].upper() for p in parts)
                 return name
@@ -712,8 +801,12 @@ def calendar(ctx: Context) -> str:
                 schedule_sorted = schedule
 
             session_name_cols = [
-                c for c in schedule_sorted.columns
-                if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc") and not c.endswith("DateUtc")
+                c
+                for c in schedule_sorted.columns
+                if c.startswith("Session")
+                and c[-1:].isdigit()
+                and not c.endswith("Utc")
+                and not c.endswith("DateUtc")
             ]
 
             def _find_session_dt(row, matchers):
@@ -724,7 +817,7 @@ def calendar(ctx: Context) -> str:
                         continue
                     lname = name.lower()
                     if any(m(lname) for m in matchers):
-                        idx = c[len("Session"):]
+                        idx = c[len("Session") :]
                         date_col = f"Session{idx}DateUtc"
                         if date_col in schedule_sorted.columns:
                             chosen_idx = date_col
@@ -736,7 +829,9 @@ def calendar(ctx: Context) -> str:
                     row,
                     [
                         lambda n: n == "qualifying",
-                        lambda n: ("qualifying" in n) and ("sprint" not in n) and ("shootout" not in n),
+                        lambda n: ("qualifying" in n)
+                        and ("sprint" not in n)
+                        and ("shootout" not in n),
                     ],
                 )
 
@@ -745,7 +840,9 @@ def calendar(ctx: Context) -> str:
                     row,
                     [
                         lambda n: n == "sprint",
-                        lambda n: ("sprint" in n) and ("qual" not in n) and ("shootout" not in n),
+                        lambda n: ("sprint" in n)
+                        and ("qual" not in n)
+                        and ("shootout" not in n),
                     ],
                 )
 
@@ -790,24 +887,38 @@ def calendar(ctx: Context) -> str:
                 else:
                     quali_str = "-"
 
-                rows_data.append({
-                    "rnd": rn,
-                    "country": country,
-                    "location": location,
-                    "sq": sprint_q_str,
-                    "s": sprint_str,
-                    "q": quali_str,
-                    "r": local_str,
-                })
+                rows_data.append(
+                    {
+                        "rnd": rn,
+                        "country": country,
+                        "location": location,
+                        "sq": sprint_q_str,
+                        "s": sprint_str,
+                        "q": quali_str,
+                        "r": local_str,
+                    }
+                )
                 events_count += 1
 
             # Compute dynamic widths with sensible caps
-            CW = clamp_width([str(r["country"]) for r in rows_data], H_COUNTRY, min_w=10, max_w=25)
-            LW = clamp_width([str(r["location"]) for r in rows_data], H_LOCATION, min_w=10, max_w=18)
-            SQW = clamp_width([str(r["sq"]) for r in rows_data], H_SPRINTQ, min_w=5, max_w=22)
-            SW = clamp_width([str(r["s"]) for r in rows_data], H_SPRINT, min_w=5, max_w=22)
-            QW = clamp_width([str(r["q"]) for r in rows_data], H_RACEQ, min_w=5, max_w=22)
-            RW = clamp_width([str(r["r"]) for r in rows_data], H_RACE, min_w=5, max_w=22)
+            CW = clamp_width(
+                [str(r["country"]) for r in rows_data], H_COUNTRY, min_w=10, max_w=25
+            )
+            LW = clamp_width(
+                [str(r["location"]) for r in rows_data], H_LOCATION, min_w=10, max_w=18
+            )
+            SQW = clamp_width(
+                [str(r["sq"]) for r in rows_data], H_SPRINTQ, min_w=5, max_w=22
+            )
+            SW = clamp_width(
+                [str(r["s"]) for r in rows_data], H_SPRINT, min_w=5, max_w=22
+            )
+            QW = clamp_width(
+                [str(r["q"]) for r in rows_data], H_RACEQ, min_w=5, max_w=22
+            )
+            RW = clamp_width(
+                [str(r["r"]) for r in rows_data], H_RACE, min_w=5, max_w=22
+            )
 
             header = (
                 f"{'Rnd':>3}  {H_COUNTRY:<{CW}}  {H_LOCATION:<{LW}}  "
@@ -850,12 +961,15 @@ def calendar(ctx: Context) -> str:
             ("RaceDate" if "RaceDate" in schedule_sorted.columns else None)
             or find_col_contains("race", "date")
             or ("EventDate" if "EventDate" in schedule_sorted.columns else None)
-            or ("EventStartDate" if "EventStartDate" in schedule_sorted.columns else None)
+            or (
+                "EventStartDate"
+                if "EventStartDate" in schedule_sorted.columns
+                else None
+            )
         )
         quali_date_col = (
-            ("QualifyingDate" if "QualifyingDate" in schedule_sorted.columns else None)
-            or find_col_contains("qualifying", "date")
-        )
+            "QualifyingDate" if "QualifyingDate" in schedule_sorted.columns else None
+        ) or find_col_contains("qualifying", "date")
 
         rows_data: list[dict] = []
         for _, row in schedule_sorted.iterrows():
@@ -877,21 +991,29 @@ def calendar(ctx: Context) -> str:
             quali_dt = row.get(quali_date_col, None) if quali_date_col else None
             quali_str = format_local(quali_dt) if quali_dt is not None else "-"
 
-            rows_data.append({
-                "rnd": rn,
-                "country": country,
-                "location": location,
-                "sq": sprint_q_str,
-                "s": sprint_str,
-                "q": quali_str,
-                "r": race_str,
-            })
+            rows_data.append(
+                {
+                    "rnd": rn,
+                    "country": country,
+                    "location": location,
+                    "sq": sprint_q_str,
+                    "s": sprint_str,
+                    "q": quali_str,
+                    "r": race_str,
+                }
+            )
             events_count += 1
 
         # Compute dynamic widths with sensible caps
-        CW = clamp_width([str(r["country"]) for r in rows_data], H_COUNTRY, min_w=10, max_w=18)
-        LW = clamp_width([str(r["location"]) for r in rows_data], H_LOCATION, min_w=10, max_w=18)
-        SQW = clamp_width([str(r["sq"]) for r in rows_data], H_SPRINTQ, min_w=5, max_w=22)
+        CW = clamp_width(
+            [str(r["country"]) for r in rows_data], H_COUNTRY, min_w=10, max_w=18
+        )
+        LW = clamp_width(
+            [str(r["location"]) for r in rows_data], H_LOCATION, min_w=10, max_w=18
+        )
+        SQW = clamp_width(
+            [str(r["sq"]) for r in rows_data], H_SPRINTQ, min_w=5, max_w=22
+        )
         SW = clamp_width([str(r["s"]) for r in rows_data], H_SPRINT, min_w=5, max_w=22)
         QW = clamp_width([str(r["q"]) for r in rows_data], H_RACEQ, min_w=5, max_w=22)
         RW = clamp_width([str(r["r"]) for r in rows_data], H_RACE, min_w=5, max_w=22)

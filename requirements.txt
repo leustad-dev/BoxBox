@@ -1,3 +1,4 @@
 fastf1==3.7.0
 typer==0.20.0
 windows-curses; platform_system == "Windows"
+black==25.11.0

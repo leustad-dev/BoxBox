@@ -1,7 +1,8 @@
 import fastf1
-session = fastf1.get_session(2025, 23, 'Q')
+
+session = fastf1.get_session(2025, 23, "Q")
 event_schedule = fastf1.get_event_schedule(2025, include_testing=True)
-print(session.name, session.date, session.event['EventName'])
+print(session.name, session.date, session.event["EventName"])
 # print(event_schedule['RoundNumber'].astype(str) + " " + event_schedule['Country'])
 print(event_schedule.columns)
 
@@ -18,5 +19,3 @@ print(event_schedule.columns)
 #
 # cols = [c for c in ['LapTime', 'Position', 'GapToLeader', 'Interval'] if c in latest_laps.columns]
 # print(latest_laps[cols])
-
-

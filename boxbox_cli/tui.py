@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from typing import Dict, Optional, List, Tuple
+import threading
+import time
+import platform
+import datetime as _dt
 
 
 def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
@@ -19,7 +23,6 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         import curses
     except Exception as exc:  # pragma: no cover - environment dependent
         # Provide per-OS guidance for installing/using curses
-        import platform
         system = platform.system()
         if system == "Windows":
             hint = "Install with: pip install windows-curses"
@@ -30,11 +33,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             )
         else:  # Linux/other
             hint = "Ensure ncurses is installed (e.g., apt/yum/pacman install libncurses/terminfo)"
-        print(
-            "Curses is not available. "
-            f"{hint}.\n"
-            f"Original error: {exc}"
-        )
+        print("Curses is not available. " f"{hint}.\n" f"Original error: {exc}")
         return
 
     from . import menu_actions as acts
@@ -152,13 +151,13 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
 
         Returns the function's result string (or error message).
         """
-        import threading
-        import time
-
         # Try to ensure color pair for red text on black exists; ignore failures on no-color terms
         try:
-            import curses  # local
-            if hasattr(curses, "has_colors") and curses.has_colors():
+            if (
+                "curses" in globals()
+                and hasattr(curses, "has_colors")
+                and curses.has_colors()
+            ):
                 curses.start_color()
                 curses.use_default_colors()
                 try:
@@ -173,7 +172,9 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         def _worker():
             try:
                 out = fn()
-                result["val"] = out if isinstance(out, str) else ("" if out is None else str(out))
+                result["val"] = (
+                    out if isinstance(out, str) else ("" if out is None else str(out))
+                )
             except Exception as exc:  # pragma: no cover
                 result["val"] = f"Error: {exc}"
 
@@ -259,7 +260,6 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             pass
 
         # Determine list of years based on options
-        import datetime as _dt
         curr_year = _dt.date.today().year
         next_year = curr_year + 1
         base = curr_year if base_year is None else int(base_year)
@@ -268,7 +268,9 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         if min_year is not None:
             prev_years = [y for y in prev_years if y >= int(min_year)]
         years = ([next_year] if include_next_year else []) + prev_years
-        labels_display = ([show_next_label] if include_next_year else []) + [str(y) for y in prev_years]
+        labels_display = ([show_next_label] if include_next_year else []) + [
+            str(y) for y in prev_years
+        ]
         sel_idx = 0
 
         # Dimensions for the dropdown window
@@ -294,7 +296,9 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
 
             title = title_text
             try:
-                win.addnstr(0, max(1, (list_width - len(title)) // 2), title, list_width - 2)
+                win.addnstr(
+                    0, max(1, (list_width - len(title)) // 2), title, list_width - 2
+                )
             except Exception:
                 pass
 
@@ -307,18 +311,27 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                             # Selected line: black on cyan + bold for visibility
                             win.attron(curses.color_pair(5))
                             win.attron(curses.A_BOLD)
-                            win.addnstr(1 + i, 1, label.ljust(list_width - 2), list_width - 2)
+                            win.addnstr(
+                                1 + i, 1, label.ljust(list_width - 2), list_width - 2
+                            )
                             win.attroff(curses.A_BOLD)
                             win.attroff(curses.color_pair(5))
                         else:
                             # Unselected: use dim attribute to simulate darker background effect
                             win.attron(curses.A_DIM)
-                            win.addnstr(1 + i, 1, label.ljust(list_width - 2), list_width - 2)
+                            win.addnstr(
+                                1 + i, 1, label.ljust(list_width - 2), list_width - 2
+                            )
                             win.attroff(curses.A_DIM)
                     else:
                         # No color support
                         marker = ">" if i == sel_idx else " "
-                        win.addnstr(1 + i, 1, f"{marker} {disp}".ljust(list_width - 2), list_width - 2)
+                        win.addnstr(
+                            1 + i,
+                            1,
+                            f"{marker} {disp}".ljust(list_width - 2),
+                            list_width - 2,
+                        )
                 except curses.error:
                     pass
 
@@ -333,12 +346,12 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
 
         while True:
             ch = stdscr.getch()
-            if ch in (27, ord('q')):  # ESC or q
+            if ch in (27, ord("q")):  # ESC or q
                 return None
-            elif ch in (curses.KEY_UP, ord('k')):
+            elif ch in (curses.KEY_UP, ord("k")):
                 sel_idx = (sel_idx - 1) % len(years)
                 _draw_dropdown()
-            elif ch in (curses.KEY_DOWN, ord('j')):
+            elif ch in (curses.KEY_DOWN, ord("j")):
                 sel_idx = (sel_idx + 1) % len(years)
                 _draw_dropdown()
             elif ch in (curses.KEY_ENTER, 10, 13):
@@ -371,7 +384,9 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             pass
 
         selected = 0
-        status = "Welcome to BoxBox CLI.\nA Formula 1 data tracker for the command line."
+        status = (
+            "Welcome to BoxBox CLI.\nA Formula 1 data tracker for the command line."
+        )
         draw(stdscr, selected, status)
 
         while True:
@@ -410,7 +425,10 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                         # Show blinking loading footer while fetching
                         year = context.get("season")
                         msg = f"Loading {year} Data...Please Wait !!"
-                        status = _run_with_loading(stdscr, msg, lambda: action(context)) or ""
+                        status = (
+                            _run_with_loading(stdscr, msg, lambda: action(context))
+                            or ""
+                        )
                     elif label == "Results":
                         # Same selector as Drivers (2018+ only, previous 20 years)
                         chosen = select_year(
@@ -426,7 +444,10 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                         # Show blinking loading footer while computing
                         year = context.get("season")
                         msg = f"Loading {year} Data...Please Wait !!"
-                        status = _run_with_loading(stdscr, msg, lambda: action(context)) or ""
+                        status = (
+                            _run_with_loading(stdscr, msg, lambda: action(context))
+                            or ""
+                        )
                     else:
                         status = action(context) or ""
                 except Exception as e:  # pragma: no cover

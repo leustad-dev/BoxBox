@@ -6,6 +6,7 @@ Run:
 
 This starts a curses-based TUI with a top menu bar navigable via arrow keys.
 """
+
 from __future__ import annotations
 
 import typer
