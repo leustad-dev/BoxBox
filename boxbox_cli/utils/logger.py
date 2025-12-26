@@ -84,8 +84,26 @@ def _suppress_ff1_logs() -> None:
                 h.setLevel(100)
 
         for name in logging.root.manager.loggerDict:
-            if name.startswith("fastf1"):
-                logging.getLogger(name).setLevel(logging.WARNING)
+            if name.startswith("fastf1") or name.startswith("requests_cache"):
+                # Set a higher level for core, api and req to reduce common data-correction noise.
+                # Note: FastF1 sometimes uses names like 'fastf1.fastf1.core'
+                is_noisy = any(suffix in name for suffix in (".core", ".api", ".req"))
+                if is_noisy:
+                    logging.getLogger(name).setLevel(logging.ERROR)
+                else:
+                    logging.getLogger(name).setLevel(logging.WARNING)
+
+        # Specifically silence requests_cache to prevent terminal corruption
+        rc_logger = logging.getLogger("requests_cache")
+        rc_logger.setLevel(logging.WARNING)
+        # Prevent it from propagating to the root logger which might print to stderr
+        rc_logger.propagate = False
+        # Add our file handler to it if not present
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file) for h in rc_logger.handlers):
+            fh_rc = logging.FileHandler(log_file, encoding='utf-8')
+            fh_rc.setLevel(logging.WARNING)
+            fh_rc.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+            rc_logger.addHandler(fh_rc)
 
     except Exception:
         pass

@@ -13,6 +13,7 @@ from .utils.cache import _enable_ff1_cache
 from .utils.stats import (
     prewarm_driver_enrichment,
     complete_season_summaries,
+    shutdown_background_tasks,
 )
 
 # Handlers
@@ -37,6 +38,7 @@ __all__ = [
     "help_about",
     "prewarm_driver_enrichment",
     "complete_season_summaries",
+    "shutdown_background_tasks",
 ]
 
 # Initialization: Initialize FastF1 cache and logging suppression automatically on import.

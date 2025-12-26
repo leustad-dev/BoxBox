@@ -7,6 +7,9 @@ import platform
 import datetime as _dt
 
 
+from . import menu_actions as acts
+
+
 def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
     """Run the curses-based TUI.
 
@@ -35,8 +38,6 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             hint = "Ensure ncurses is installed (e.g., apt/yum/pacman install libncurses/terminfo)"
         print("Curses is not available. " f"{hint}.\n" f"Original error: {exc}")
         return
-
-    from . import menu_actions as acts
 
     # Global-ish color state for this screen
     has_colors: bool = False
@@ -627,7 +628,10 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         draw(stdscr, selected, status, scroll=scroll)
 
         while True:
-            ch = stdscr.getch()
+            try:
+                ch = stdscr.getch()
+            except KeyboardInterrupt:
+                break
 
             if ch in (ord("q"), 27):  # q or ESC
                 break
@@ -687,9 +691,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                             context["season"] = chosen
                         # Show loading while fetching; drivers() may return dict with metadata
                         year = context.get("season")
-                        msg = f"Loading {year} Data...Please Wait !!"
+                        msg = f"Aggregating {year} Season Stats...Please Wait !!"
                         result = _run_with_loading(stdscr, msg, lambda: action(context))
-                        from . import menu_actions as acts
                         # If error string, just show it
                         if isinstance(result, str):
                             status = result
@@ -924,7 +927,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                                         if itype == "driver":
                                             abbr = item.get("abbr")
                                             y = int(season or 0)
-                                            msg2 = f"Loading {y} Data...Please Wait !!"
+                                            msg2 = f"Fetching Details for {abbr}...Please Wait !!"
                                             stext = _run_with_loading(
                                                 stdscr,
                                                 msg2,
@@ -936,7 +939,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                                         elif itype == "team":
                                             team = item.get("team")
                                             y = int(season or 0)
-                                            msg2 = f"Loading {y} Data...Please Wait !!"
+                                            msg2 = f"Fetching Details for {team}...Please Wait !!"
                                             stext = _run_with_loading(
                                                 stdscr,
                                                 msg2,
@@ -978,5 +981,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 pass
 
             draw(stdscr, selected, status, scroll=scroll)
+
+        # Cleanup background tasks before exiting curses
+        acts.shutdown_background_tasks()
 
     curses.wrapper(main)
