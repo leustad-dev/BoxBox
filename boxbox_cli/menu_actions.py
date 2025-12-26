@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 from datetime import date, datetime, timezone
 
+import math
 import fastf1
 import os
 import io
@@ -28,6 +29,9 @@ try:  # pragma: no cover - environment dependent
     from fastf1 import Cache as _FF1Cache  # type: ignore
 
     def _enable_ff1_cache() -> None:
+        # Suppress FastF1 logs to avoid corrupting the TUI.
+        _suppress_ff1_logs()
+
         cache_dir = os.getenv("FASTF1_CACHE_DIR")
         if not cache_dir:
             # Default to project root / cache
@@ -63,6 +67,60 @@ Context = Dict[str, Optional[object]]
 
 # --- Lightweight file logger -------------------------------------------------
 _LOG_FILE_PATH: Optional[str] = None
+
+
+def _suppress_ff1_logs() -> None:
+    """Ensure FastF1 loggers do not output to the console and redirect to file.
+    
+    FastF1 uses its own internal LoggingManager which sets up a StreamHandler
+    on the 'fastf1' logger. We remove it and add a FileHandler.
+    """
+    try:
+        import logging
+        import fastf1
+        
+        # Ensure the logs directory exists and get a file path
+        logs_dir = _ensure_logs_dir()
+        # We reuse the same log file for the session if already created
+        log_file = _open_log_file()
+        
+        ff1_logger = logging.getLogger("fastf1")
+        
+        # 1. Silence the logger itself and its children at the logger level
+        # We set it to WARNING to capture important stuff in the file, 
+        # but we will control the output via handlers.
+        ff1_logger.setLevel(logging.WARNING)
+        fastf1.set_log_level("WARNING")
+        
+        # 2. Redirect output: Remove StreamHandlers and add FileHandler
+        # FastF1's set_log_level often re-adds or modifies a StreamHandler.
+        
+        # Check if we already have our FileHandler to avoid duplicates
+        has_file_handler = any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_file) for h in ff1_logger.handlers)
+        
+        if not has_file_handler:
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setLevel(logging.WARNING)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            fh.setFormatter(formatter)
+            ff1_logger.addHandler(fh)
+            
+        # 3. Remove or silence any StreamHandlers (console output)
+        for h in ff1_logger.handlers[:]:
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                # We can either remove it or set its level to CRITICAL+1 to silence it
+                # Removing is cleaner but FastF1 might re-add it.
+                # Setting level to a very high value is safer.
+                h.setLevel(100) 
+                # ff1_logger.removeHandler(h) # Uncomment if we prefer removal
+                
+        # 4. Force set level for all currently existing fastf1 loggers
+        for name in logging.root.manager.loggerDict:
+            if name.startswith("fastf1"):
+                logging.getLogger(name).setLevel(logging.WARNING)
+                
+    except Exception:
+        pass
 
 
 def _ensure_logs_dir() -> str:
@@ -124,6 +182,7 @@ def drivers(ctx: Context):
     - Renders a fixed-width table similar to the Calendar view and includes row metadata
       so the TUI can enable selection of teams and drivers.
     """
+    _suppress_ff1_logs()
     try:
         year = int(ctx.get("season") or date.today().year)
     except Exception:
@@ -420,6 +479,7 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
       }
       teams: dict[team] -> {wins, podiums, poles, fastest_laps, pitstops, avg_finish_sum, avg_finish_cnt}
     """
+    _suppress_ff1_logs()
     # Cache hit
     cached = _SEASON_STATS_CACHE.get(year)
     if cached and cached.get("basic_ready"):
@@ -455,6 +515,7 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
             "pitstops": 0,
             "avg_finish_sum": 0.0,
             "avg_finish_cnt": 0,
+            "points": 0.0,
         }
     )
 
@@ -525,6 +586,13 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
         fmt = str(row.get("EventFormat", "") or "").lower()
         if "sprint" in fmt:
             to_consider.append("S")
+        else:
+            # Fallback: scan session names for "sprint"
+            for nc in [c for c in cols if c.startswith("Session") and c[-1:].isdigit() and not c.endswith("Utc")]:
+                sn = str(row.get(nc, "") or "").lower()
+                if "sprint" in sn and "qual" not in sn and "shootout" not in sn:
+                    to_consider.append("S")
+                    break
 
         for code in to_consider:
             ts = _session_dt_utc(row, code)
@@ -565,9 +633,13 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
                     pts = r.get("Points", 0) or 0
                     try:
                         pts = float(pts)
+                        if math.isnan(pts):
+                            pts = 0.0
                     except Exception:
                         try:
                             pts = float(str(pts).strip())
+                            if math.isnan(pts):
+                                pts = 0.0
                         except Exception:
                             pts = 0.0
 
@@ -605,18 +677,25 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
                         pass
 
                     try:
-                        ipos = int(pos)
+                        if math.isnan(float(pos)):
+                            ipos = 0
+                        else:
+                            ipos = int(pos)
                         if ipos == 1:
                             d["wins"] += 1
-                        if ipos <= 3:
+                        if 1 <= ipos <= 3:
                             d["podiums"] += 1
-                        d["avg_finish_sum"] += ipos
-                        d["avg_finish_cnt"] += 1
+                        if ipos > 0:
+                            d["avg_finish_sum"] += ipos
+                            d["avg_finish_cnt"] += 1
                     except Exception:
                         pass
 
                     try:
-                        igrid = int(grid)
+                        if math.isnan(float(grid)):
+                            igrid = 0
+                        else:
+                            igrid = int(grid)
                         if igrid > 0:
                             d["avg_grid_sum"] += igrid
                             d["avg_grid_cnt"] += 1
@@ -625,6 +704,8 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
 
                     # accumulate season points
                     d["points"] += pts
+                    if team:
+                        teams[team]["points"] += pts
 
                     # pit stops only in heavy mode to avoid loading laps by default
                     if not basic_only:
@@ -635,9 +716,13 @@ def _aggregate_season_stats(year: int, *, basic_only: bool = True):
                             pass
 
                     if team:
-                        if code == "R" and isinstance(pos, (int, float)):
-                            teams[team]["avg_finish_sum"] += int(pos)
-                            teams[team]["avg_finish_cnt"] += 1
+                        try:
+                            fpos = float(pos)
+                            if code == "R" and not math.isnan(fpos):
+                                teams[team]["avg_finish_sum"] += int(fpos)
+                                teams[team]["avg_finish_cnt"] += 1
+                        except Exception:
+                            pass
                         if code == "R" and not basic_only:
                             try:
                                 teams[team]["pitstops"] += int(dlaps["PitInTime"].notna().sum())
@@ -674,6 +759,7 @@ def _ensure_session_summary(year: int, rnd: int, code: str) -> Optional[dict]:
     returns { 'pitstops': {abbr: int}, 'fastest': abbr_or_'' }
     Caches the result in _SEASON_STATS_CACHE[year]['session_summaries'].
     """
+    _suppress_ff1_logs()
     cache = _SEASON_STATS_CACHE.get(year)
     if not cache:
         _aggregate_season_stats(year, basic_only=True)
@@ -765,6 +851,7 @@ def prewarm_driver_enrichment(year: int, abbrs: list[str]) -> None:
 
     Idempotent across calls; also safe to run multiple times.
     """
+    _suppress_ff1_logs()
     if year < 2018:
         return
     # Ensure basic cache
@@ -884,6 +971,7 @@ def prewarm_driver_enrichment(year: int, abbrs: list[str]) -> None:
 
 def driver_stats(ctx: Context, year: int, abbr: str) -> str:
     """Build a stats summary for a driver in a given season (2018+)."""
+    _suppress_ff1_logs()
     if year < 2018:
         return "Driver statistics are only available from 2018 onwards."
     drivers, _ = _aggregate_season_stats(year, basic_only=True)
@@ -921,6 +1009,17 @@ def driver_stats(ctx: Context, year: int, abbr: str) -> str:
     total_fl = int(s.get("fastest_laps") or 0)
     total_fl = max(total_fl, fl_extra)
 
+    try:
+        pts_val = float(s['points'])
+        if math.isnan(pts_val):
+            pts_display = "0"
+        elif pts_val.is_integer():
+            pts_display = str(int(pts_val))
+        else:
+            pts_display = str(round(pts_val, 1))
+    except Exception:
+        pts_display = "0"
+
     lines = [
         f"Driver Statistics — {year}",
         "-" * 40,
@@ -928,7 +1027,7 @@ def driver_stats(ctx: Context, year: int, abbr: str) -> str:
         f"Team: {s['team']}",
         f"Driver No: {s['number']}",
         "",
-        f"Total Points: {int(s['points']) if float(s['points']).is_integer() else round(float(s['points']), 1)}",
+        f"Total Points: {pts_display}",
         f"Poles: {s['poles']}",
         f"Wins: {s['wins']}",
         f"Podiums: {s['podiums']}",
@@ -1018,6 +1117,7 @@ def complete_season_summaries(year: int) -> None:
 
 def constructor_stats(ctx: Context, year: int, team_name: str) -> str:
     """Build a stats summary for a constructor in a given season (2018+)."""
+    _suppress_ff1_logs()
     if year < 2018:
         return "Constructor statistics are only available from 2018 onwards."
     _, teams = _aggregate_season_stats(year)
@@ -1048,6 +1148,7 @@ def results(ctx: Context) -> str:
     - Teams table:   Pos, Team, Pts (sorted by points desc)
     - Seasons prior to 2018 are not supported here (no live timing/results).
     """
+    _suppress_ff1_logs()
     try:
         year = int(ctx.get("season") or date.today().year)
     except Exception:
@@ -1070,186 +1171,25 @@ def results(ctx: Context) -> str:
         return "Driver/Team results are only available from 2018 onwards."
 
     # Aggregation stores
-    from collections import defaultdict
+    drivers_data, teams_data = _aggregate_season_stats(year, basic_only=True)
 
-    driver_points: dict[str, float] = defaultdict(float)
-    driver_name: dict[str, str] = {}
-    driver_nat: dict[str, str] = {}
-    driver_team: dict[str, str] = {}
-
-    team_points: dict[str, float] = defaultdict(float)
-
-    # Get schedule and iterate sessions up to now
-    try:
-        schedule = fastf1.get_event_schedule(year, include_testing=False)
-    except Exception as exc:
-        _log(f"[results] ERROR loading schedule: {exc}")
+    if not drivers_data and not teams_data:
+        _log(f"[results] WARN: No data aggregated for {year}")
         return f"No data Available for {year} F1 Season..."
 
-    cols = list(getattr(schedule, "columns", []))
-    now_utc = datetime.now(timezone.utc)
+    driver_points: dict[str, float] = {abbr: d["points"] for abbr, d in drivers_data.items()}
+    driver_name: dict[str, str] = {abbr: d["name"] for abbr, d in drivers_data.items()}
+    driver_nat: dict[str, str] = {abbr: d["nat"] for abbr, d in drivers_data.items()}
+    driver_team: dict[str, str] = {abbr: d["team"] for abbr, d in drivers_data.items()}
 
-    def _row_has_sprint(row) -> bool:
-        # Detect sprint weekend via EventFormat or session names
-        fmt = str(row.get("EventFormat", "") or "").lower()
-        if "sprint" in fmt:
-            return True
-        # else scan session names
-        for c in cols:
-            if (
-                c.startswith("Session")
-                and not c.endswith("Utc")
-                and not c.endswith("DateUtc")
-                and c[-1:].isdigit()
-            ):
-                name = str(row.get(c, "") or "").lower()
-                if name == "sprint" or (
-                    "sprint" in name and "qual" not in name and "shootout" not in name
-                ):
-                    return True
-        return False
-
-    def _session_dt_utc(row, code: str):
-        # Try to find a matching datetime for code to filter future sessions
-        name_cols = [
-            c
-            for c in cols
-            if c.startswith("Session")
-            and c[-1:].isdigit()
-            and not c.endswith("Utc")
-            and not c.endswith("DateUtc")
-        ]
-        for nc in name_cols:
-            idx = nc[len("Session") :]
-            dcol = f"Session{idx}DateUtc"
-            name = str(row.get(nc, "") or "").strip().lower()
-            if code == "R" and (
-                name == "race" or "grand prix" in name or "grandprix" in name
-            ):
-                return row.get(dcol)
-            if code == "S" and (
-                name == "sprint"
-                or ("sprint" in name and "qual" not in name and "shootout" not in name)
-            ):
-                return row.get(dcol)
-        return None
-
-    # Iterate events
-    rounds_processed = 0
-    sessions_loaded = 0
-    for _, row in schedule.iterrows():
-        rnd_val = row.get("RoundNumber", None)
-        try:
-            rnd = int(rnd_val)
-        except Exception:
-            _log(f"[results] skip row with invalid RoundNumber={rnd_val}")
-            continue
-
-        # Determine which sessions to aggregate
-        to_consider = ["R"]
-        if _row_has_sprint(row):
-            to_consider.append("S")
-
-        for code in to_consider:
-            # Skip future sessions by timestamp if available
-            ts = _session_dt_utc(row, code)
-            try:
-                # Normalize pandas.Timestamp and naive datetimes
-                import pandas as _pd  # type: ignore
-
-                if isinstance(ts, _pd.Timestamp):
-                    if ts.tzinfo is None:
-                        ts = ts.tz_localize("UTC")
-                    ts = ts.tz_convert("UTC").to_pydatetime()
-                if isinstance(ts, datetime) and ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            except Exception:
-                pass
-            if ts is not None and isinstance(ts, datetime) and ts > now_utc:
-                # future session skipped (info suppressed)
-                continue
-
-            try:
-                sess = fastf1.get_session(year, rnd, code)
-                sess.load(telemetry=False, laps=False, weather=False, messages=False)
-                df = getattr(sess, "results", None)
-                if df is None or getattr(df, "empty", False):
-                    # empty results (info suppressed)
-                    continue
-                sessions_loaded += 1
-                rounds_processed = max(rounds_processed, rnd)
-
-                # Determine useful columns
-                cols_r = set(df.columns)
-                name_col = (
-                    "FullName"
-                    if "FullName" in cols_r
-                    else (
-                        "DriverName"
-                        if "DriverName" in cols_r
-                        else ("Driver" if "Driver" in cols_r else "Abbreviation")
-                    )
-                )
-                team_col = (
-                    "TeamName"
-                    if "TeamName" in cols_r
-                    else ("Team" if "Team" in cols_r else None)
-                )
-                pts_col = (
-                    "Points"
-                    if "Points" in cols_r
-                    else ("points" if "points" in cols_r else None)
-                )
-
-                if pts_col is None:
-                    _log(
-                        f"[results] no Points column for rnd={rnd} code={code}; columns={list(df.columns)}"
-                    )
-                    continue
-
-                for _, r in df.iterrows():
-                    abbr = str(r.get("Abbreviation", "") or "").strip()
-                    pts = r.get(pts_col, 0) or 0
-                    try:
-                        pts = float(pts)
-                    except Exception:
-                        try:
-                            pts = float(str(pts).strip())
-                        except Exception:
-                            pts = 0.0
-                    name = str(r.get(name_col, abbr) or abbr)
-                    team = str(r.get(team_col, "") or "") if team_col else ""
-
-                    # Nationality via driver metadata when possible
-                    nat = driver_nat.get(abbr)
-                    if not nat and hasattr(sess, "get_driver") and abbr:
-                        try:
-                            dmeta = sess.get_driver(abbr) or {}
-                            nat = (
-                                dmeta.get("CountryCode")
-                                or dmeta.get("Nationality")
-                                or ""
-                            )
-                        except Exception:
-                            nat = ""
-
-                    # Update driver stores
-                    driver_points[abbr] += pts
-                    if name and abbr not in driver_name:
-                        driver_name[abbr] = name
-                    if nat:
-                        driver_nat[abbr] = nat
-                    if team:
-                        driver_team[abbr] = team
-
-                    # Update team totals
-                    if team:
-                        team_points[team] += pts
-
-                # aggregated successfully (info suppressed)
-            except Exception as exc:
-                _log(f"[results] ERROR loading rnd={rnd} code={code}: {exc}")
-                continue
+    team_points: dict[str, float] = {team: t["points"] for team, t in teams_data.items() if "points" in t}
+    # Fallback if team points not in teams_data (old logic didn't have it but I'll add it to _aggregate_season_stats)
+    if not team_points:
+        from collections import defaultdict
+        team_points = defaultdict(float)
+        for abbr, d in drivers_data.items():
+            if d["team"]:
+                team_points[d["team"]] += d["points"]
 
     # Prepare drivers table lines
     left_lines: list[str] = []
@@ -1301,8 +1241,18 @@ def results(ctx: Context) -> str:
         name = driver_name.get(abbr, abbr)
         nat = driver_nat.get(abbr, "")
         team = driver_team.get(abbr, "")
+        try:
+            fpts = float(pts)
+            if math.isnan(fpts):
+                pts_display = "0"
+            elif fpts.is_integer():
+                pts_display = str(int(fpts))
+            else:
+                pts_display = str(round(fpts, 1))
+        except Exception:
+            pts_display = "0"
         left_lines.append(
-            f"{pos_counter:>{POSW}}  {clip(name, DNAMEW):<{DNAMEW}}  {clip(nat, NATW):<{NATW}}  {clip(team, TNAMEW):<{TNAMEW}}  {int(pts) if float(pts).is_integer() else round(pts,1):>{PTSW}}"
+            f"{pos_counter:>{POSW}}  {clip(name, DNAMEW):<{DNAMEW}}  {clip(nat, NATW):<{NATW}}  {clip(team, TNAMEW):<{TNAMEW}}  {pts_display:>{PTSW}}"
         )
         d_count += 1
         pos_counter += 1
@@ -1312,10 +1262,20 @@ def results(ctx: Context) -> str:
     # Prepare teams table lines
     right_lines: list[str] = []
     # Compute dynamic widths for constructor table
-    team_rows_preview = [
-        {"team": t, "pts": int(p) if float(p).is_integer() else round(p, 1)}
-        for t, p in team_points.items()
-    ]
+    team_rows_preview = []
+    for t, p in team_points.items():
+        try:
+            fp = float(p)
+            if math.isnan(fp):
+                p_disp = "0"
+            elif fp.is_integer():
+                p_disp = str(int(fp))
+            else:
+                p_disp = str(round(fp, 1))
+        except Exception:
+            p_disp = "0"
+        team_rows_preview.append({"team": t, "pts": p_disp})
+
     T_POSW = _w(
         [str(i) for i in range(1, max(1, len(team_rows_preview)) + 1)],
         "Pos",
@@ -1334,8 +1294,18 @@ def results(ctx: Context) -> str:
     t_count = 0
     pos_counter = 1
     for team, pts in teams_sorted:
+        try:
+            fpts = float(pts)
+            if math.isnan(fpts):
+                pts_display = "0"
+            elif fpts.is_integer():
+                pts_display = str(int(fpts))
+            else:
+                pts_display = str(round(fpts, 1))
+        except Exception:
+            pts_display = "0"
         right_lines.append(
-            f"{pos_counter:>{T_POSW}}  {clip(team, T_TEAMW):<{T_TEAMW}}  {int(pts) if float(pts).is_integer() else round(pts,1):>{T_PTSW}}"
+            f"{pos_counter:>{T_POSW}}  {clip(team, T_TEAMW):<{T_TEAMW}}  {pts_display:>{T_PTSW}}"
         )
         t_count += 1
         pos_counter += 1
@@ -1344,9 +1314,7 @@ def results(ctx: Context) -> str:
 
     # No data handling
     if d_count == 0 and t_count == 0:
-        _log(
-            f"[results] WARN: No data aggregated for {year}; rounds_processed={rounds_processed}, sessions_loaded={sessions_loaded}"
-        )
+        _log(f"[results] WARN: No data aggregated for {year}")
         return f"No data Available for {year} F1 Season..."
 
     # Compose side-by-side lines
@@ -1391,6 +1359,7 @@ def calendar(ctx: Context) -> str:
     - For seasons < 2018, uses Ergast backend implicitly (or explicitly here)
       and falls back to available date columns.
     """
+    _suppress_ff1_logs()
     try:
         year = int(ctx.get("season") or date.today().year)
     except Exception:

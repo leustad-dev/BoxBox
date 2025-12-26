@@ -94,8 +94,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         ("Help", acts.help_about),
     ]
 
-    def draw(stdscr, selected_idx: int, status: str, *, focused: bool = True) -> None:
-        stdscr.clear()
+    def draw(stdscr, selected_idx: int, status: str, *, focused: bool = True, scroll: int = 0) -> None:
+        stdscr.erase()
         h, w = stdscr.getmaxyx()
 
         # Initialize colors once
@@ -161,10 +161,10 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 stdscr.addstr(0, x, labels[: max(0, w - x)])
 
         # Status area (supports multi-line output). Use bold to simulate larger font.
-        _render_status_lines(stdscr, (status or "").split("\n"))
+        _render_status_lines(stdscr, (status or "").split("\n"), scroll=scroll)
 
         # Help footer
-        help_text = "← → navigate  •  Enter select  •  q or ESC to quit"
+        help_text = "↑ ↓ ← → navigate  •  Enter select  •  q or ESC to quit"
         try:
             stdscr.attron(curses.A_DIM)
             stdscr.addstr(h - 1, 1, help_text[: max(0, w - 2)])
@@ -172,7 +172,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         except curses.error:
             stdscr.addstr(h - 1, 1, help_text[: max(0, w - 2)])
 
-        stdscr.refresh()
+        stdscr.noutrefresh()
+        curses.doupdate()
 
     def _run_with_loading(stdscr, message: str, fn) -> Any:
         """Run a potentially long-running function in a thread while showing a
@@ -216,7 +217,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                         stdscr.addstr(y, 1, text[: max(0, w - 2)])
                         if hasattr(curses, "has_colors") and curses.has_colors():
                             stdscr.attroff(curses.color_pair(8))
-                    stdscr.refresh()
+                    stdscr.noutrefresh()
+                    curses.doupdate()
                 except Exception:
                     pass
 
@@ -240,7 +242,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             h, w = stdscr.getmaxyx()
             y = max(0, h - 2)
             stdscr.addstr(y, 0, " " * max(0, w))
-            stdscr.refresh()
+            stdscr.noutrefresh()
+            curses.doupdate()
         except Exception:
             pass
 
@@ -346,7 +349,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         focused: bool = True,
     ) -> None:
         # Redraw header and footer, then render provided lines with optional highlight
-        stdscr.clear()
+        stdscr.erase()
         h, w = stdscr.getmaxyx()
 
         # Ensure colors and pairs are initialized consistently in this path too
@@ -425,7 +428,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         help_text = (
             help_text_override
             if help_text_override is not None
-            else "← → navigate  •  Enter select  •  q or ESC to quit"
+            else "↑↓←→ navigate  •  Enter select  •  q or ESC to quit"
         )
         try:
             stdscr.attron(curses.A_DIM)
@@ -434,7 +437,8 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         except curses.error:
             stdscr.addstr(h - 1, 1, help_text[: max(0, w - 2)])
 
-        stdscr.refresh()
+        stdscr.noutrefresh()
+        curses.doupdate()
 
     def _popup(stdscr, title: str, body_lines: List[str]) -> None:
         """Show a centered popup with a title and body lines. Close on Enter/ESC."""
@@ -612,10 +616,11 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
             pass
 
         selected = 0
+        scroll = 0
         status = (
             "Welcome to BoxBox CLI.\nA Formula 1 data tracker for the command line."
         )
-        draw(stdscr, selected, status)
+        draw(stdscr, selected, status, scroll=scroll)
 
         while True:
             ch = stdscr.getch()
@@ -624,10 +629,32 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 break
             elif ch in (curses.KEY_RIGHT, ord("l")):
                 selected = (selected + 1) % len(menu_items)
+                scroll = 0
             elif ch in (curses.KEY_LEFT, ord("h")):
                 selected = (selected - 1) % len(menu_items)
+                scroll = 0
+            elif ch in (curses.KEY_UP, ord("k")):
+                scroll = max(0, scroll - 1)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                # Estimate if we can scroll further
+                lines = (status or "").split("\n")
+                h, w = stdscr.getmaxyx()
+                max_rows = max(0, h - 3)
+                if len(lines) > scroll + max_rows:
+                    scroll += 1
+            elif ch == curses.KEY_PPAGE:
+                h, w = stdscr.getmaxyx()
+                max_rows = max(0, h - 3)
+                scroll = max(0, scroll - max_rows)
+            elif ch == curses.KEY_NPAGE:
+                lines = (status or "").split("\n")
+                h, w = stdscr.getmaxyx()
+                max_rows = max(0, h - 3)
+                if len(lines) > scroll + max_rows:
+                    scroll = min(len(lines) - max_rows, scroll + max_rows)
             elif ch in (curses.KEY_ENTER, 10, 13):
                 # Execute the selected action
+                scroll = 0
                 try:
                     label, action = menu_items[selected]
                     if label == "Calendar":
@@ -946,6 +973,6 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 # Redraw on resize
                 pass
 
-            draw(stdscr, selected, status)
+            draw(stdscr, selected, status, scroll=scroll)
 
     curses.wrapper(main)
