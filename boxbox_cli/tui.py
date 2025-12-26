@@ -43,6 +43,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
     _inactive_pair_bg: Optional[int] = None  # runtime-chosen color index for dark grey bg
 
     def _init_colors_if_needed():
+        """Initialize curses color pairs if the terminal supports color."""
         nonlocal has_colors
         nonlocal _inactive_pair_bg
         try:
@@ -95,6 +96,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
     ]
 
     def draw(stdscr, selected_idx: int, status: str, *, focused: bool = True, scroll: int = 0) -> None:
+        """Render the main TUI screen, including the menu bar, content area, and help footer."""
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
@@ -348,6 +350,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
         *,
         focused: bool = True,
     ) -> None:
+        """Render the TUI screen with a provided list of lines, supporting cell-level highlighting."""
         # Redraw header and footer, then render provided lines with optional highlight
         stdscr.erase()
         h, w = stdscr.getmaxyx()
@@ -603,6 +606,7 @@ def run_tui(context: Dict[str, Optional[object]] | None = None) -> None:
                 _draw_dropdown()
 
     def main(stdscr):
+        """Main TUI loop, handling keyboard input and navigation."""
         # Basic curses setup
         curses.curs_set(0)
         stdscr.nodelay(False)
