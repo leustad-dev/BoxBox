@@ -4,6 +4,7 @@ cache/*.sqlite
 
 # FastF1 cache artifacts (ensure all cache subfolders are ignored)
 cache/*.sqllite
+cache/stats/*
 cache/*.ff1pkl
 cache/**/*.sqllite
 cache/**/*.ff1pkl
